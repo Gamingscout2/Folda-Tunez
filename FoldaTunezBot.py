@@ -330,11 +330,23 @@ class AdminCLI(Cmd):
                 print("Channel not found")
                 return
 
-            if isinstance(channel, discord.TextChannel):
+            # Ensure the channel is a text channel
+            if not isinstance(channel, discord.TextChannel):
+                print("Error: The specified channel is not a text channel")
+                return
+
+            # Check if the bot has permissions to send messages in the channel
+            if not channel.permissions_for(guild.me).send_messages:
+                print("Error: Bot does not have permission to send messages in this channel")
+                return
+
+            try:
                 await channel.send(message)
                 print(f"Message sent to {channel.name}")
-            else:
-                print("Not a text channel")
+            except discord.Forbidden:
+                print("Error: Bot does not have permission to send messages in this channel")
+            except discord.HTTPException as e:
+                print(f"Error sending message: {e}")
 
         self._safe_run_coroutine(send())
 
