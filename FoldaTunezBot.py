@@ -213,6 +213,7 @@ from cmd import Cmd
 from tabulate import tabulate
 import subprocess
 
+
 # Initialize ID mappings
 guild_bot_ids = {}
 channel_bot_ids = {}
@@ -802,6 +803,7 @@ async def help(ctx):
         "🎵 **Music Commands**:",
         f"`{BOT_PREFIX}join` - Join your voice channel",
         f"`{BOT_PREFIX}stream <url>` - Stream from YouTube/SoundCloud/etc",
+        f"'{BOT_PREFIX}spotify <url>' - Play Spotify track / playlist",
         f"`{BOT_PREFIX}queue` - Show current queue with timestamps",
         f"`{BOT_PREFIX}skip` - Skip current track",
         f"`{BOT_PREFIX}pause` - Pause playback",
@@ -816,6 +818,7 @@ async def help(ctx):
         "\n⚙️ **Examples**:",
         f"`{BOT_PREFIX}stream https://youtu.be/dQw4w9WgXcQ`",
         f"`{BOT_PREFIX}playlist_local my_playlist.txt`",
+        f"Folda Tunez v2.3.1"
         "\nNeed admin help? Contact your server moderators!"
     ]
 
@@ -827,6 +830,7 @@ async def help(ctx):
 
 
 # NEW QUEUE COMMAND
+# Updated queue command
 @bot.command()
 async def queue(ctx):
     """Show current queue with playback information"""
@@ -842,7 +846,7 @@ async def queue(ctx):
     if state.current_song:
         elapsed = int(time.time() - state.start_time)
         elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"
-        duration = state.current_song['duration']
+        duration = state.current_song.get('duration', 0)  # Use .get() with default
         duration_str = f"{duration // 60}:{duration % 60:02d}" if duration > 0 else "Unknown"
         message.append(
             f"**Now Playing:** {state.current_song['title']}\n"
@@ -853,8 +857,8 @@ async def queue(ctx):
     if state.queue_list:
         message.append("\n**Upcoming:**")
         for idx, song in enumerate(state.queue_list, 1):
-            duration_str = f"{song['duration'] // 60}:{song['duration'] % 60:02d}" if song[
-                                                                                          'duration'] > 0 else "Unknown"
+            duration = song.get('duration', 0)  # Use .get() with default
+            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration > 0 else "Unknown"
             message.append(
                 f"{idx}. {song['title']} ({duration_str}) | {song['requester']}"
             )
@@ -864,54 +868,55 @@ async def queue(ctx):
 
 @bot.command()
 async def stream(ctx, url: str):
+
     try:
-        if not ctx.voice_client:
-            await ctx.send("❗ Join a voice channel first!")
-            return
+            if not ctx.voice_client:
+                await ctx.send("❗ Join a voice channel first!")
+                return
 
-        # Enhanced playlist detection
-        if any(key in url for key in ['list=', 'playlist']):
-            await process_playlist(ctx, url)
-            return
+            # Enhanced playlist detection
+            if any(key in url for key in ['list=', 'playlist']):
+                await process_playlist(ctx, url)
+                return
 
-        # Original single video handling
-        temp_title = url.split('=')[-1][:30]
-        await ctx.send(f"⏳ Downloading: {temp_title}...")
+            # Original single video handling
+            temp_title = url.split('=')[-1][:30]
+            await ctx.send(f"⏳ Downloading: {temp_title}...")
 
-        ydl_opts = {
-            'source_address': '0.0.0.0',
-            'geo-bypass': True,
-            'format': 'bestaudio/best',
-            'outtmpl': 'downloads/%(title)s.%(ext)s',  # Keep original format
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        }
-
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            info = await bot.loop.run_in_executor(
-                download_executor,
-                lambda: ydl.extract_info(url, download=True)
-            )
-            filepath = ydl.prepare_filename(info).replace('.webm', '.mp3')
-
-        state = guild_states[ctx.guild.id]
-        async with state.lock:
-            song = {
-                'title': info.get('title', 'Unknown Track'),
-                'url': os.path.abspath(filepath),
-                'requester': ctx.author.display_name,
-                'duration': info.get('duration', 0)
+            ydl_opts = {
+                'source_address': '0.0.0.0',
+                'geo-bypass': True,
+                'format': 'bestaudio/best',
+                'outtmpl': 'downloads/%(title)s.%(ext)s',  # Keep original format
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
             }
-            await state.queue.put(song)
-            state.queue_list.append(song)
 
-        await ctx.send(f"✅ Added: {song['title']}")
+            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                info = await bot.loop.run_in_executor(
+                    download_executor,
+                    lambda: ydl.extract_info(url, download=True)
+                )
+                filepath = ydl.prepare_filename(info).replace('.webm', '.mp3')
 
-        if not ctx.voice_client.is_playing():
-            await play_next(ctx)
+            state = guild_states[ctx.guild.id]
+            async with state.lock:
+                song = {
+                    'title': info.get('title', 'Unknown Track'),
+                    'url': os.path.abspath(filepath),
+                    'requester': ctx.author.display_name,
+                    'duration': info.get('duration', 0)
+                }
+                await state.queue.put(song)
+                state.queue_list.append(song)
+
+            await ctx.send(f"✅ Added: {song['title']}")
+
+            if not ctx.voice_client.is_playing():
+                await play_next(ctx)
 
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
@@ -1033,7 +1038,8 @@ async def process_playlist(ctx, url):
                     'url': video_url,
                     'status': 'pending',
                     'title': entry.get('title', 'Unknown Track'),
-                    'requester': ctx.author.display_name
+                    'requester': ctx.author.display_name,
+                    'duration': entry.get('duration', 0)  # Add this line
                 })
 
         # Create and run download tasks
@@ -1051,7 +1057,6 @@ async def process_playlist(ctx, url):
     except Exception as e:
         logger.error(f"Playlist error: {traceback.format_exc()}")
         await ctx.send("❌ Failed to process playlist")
-
 
 
 @bot.command()
@@ -1161,6 +1166,9 @@ async def shuffle(ctx):
                 j = random.randint(0, i)
                 shuffle_slice[i], shuffle_slice[j] = shuffle_slice[j], shuffle_slice[i]
 
+            # Update the original items list with shuffled slice
+            items[shuffle_start:] = shuffle_slice  # FIX: Apply shuffled slice back to items
+
             # Rebuild queue and update tracking
             state.queue = asyncio.Queue()
             state.queue_list.clear()
@@ -1208,7 +1216,7 @@ async def playlist_local(ctx, filename: str):
                         'title': os.path.basename(song_path),
                         'url': song_path,
                         'requester': ctx.author.display_name,
-                        'duration': 0
+                        'duration': 0  # Explicitly set default
                     }
                     await state.queue.put(song)
                     state.queue_list.append(song)
