@@ -3,6 +3,29 @@ Folda Tunez Discord Bot
 by Preston Parsons
 01/07/2025
 
+Version 2.2 Updated 03/02/2025
+
+New Features & Improvements:
+
+    Enhanced Queue Management:
+        Introduced a new queue command that displays the currently playing song with its elapsed time and lists upcoming tracks.
+        Updated the underlying GuildState to maintain an ordered queue_list and track the song’s start time for accurate playback progress.
+
+    Improved Metadata Handling:
+        Both the stream and playlist_local commands now store additional metadata—such as the requester’s display name and track duration—to improve transparency and user experience.
+
+    CLI Enhancements:
+        Added a new CLI queue command within the AdminCLI, allowing administrators to send the current queue status directly to a specified text channel.
+        Improved error handling and ID resolution for better stability and ease-of-use in the CLI environment.
+
+    Queue Operations Refinement:
+        Modified the shuffle command to update the queue order accurately while maintaining consistency in the playback order.
+        Optimized thread-safe operations within queue management to prevent race conditions and ensure smooth playback transitions.
+
+    General Code Quality & Stability:
+        Incorporated additional locking and error handling mechanisms to handle concurrent operations more gracefully.
+        Enhanced logging to provide more detailed insights for debugging and monitoring.
+
 Version 2.1 Updated 02/21/2025
     New Features and Improvements:
 
@@ -172,12 +195,14 @@ logger = logging.getLogger(__name__)
 download_executor = ThreadPoolExecutor(max_workers=MAX_THREADS)
 
 
-# Guild state management
+# Guild state management - UPDATED
 class GuildState:
     def __init__(self):
         self.queue = asyncio.Queue()
+        self.queue_list = []  # NEW: Track queue order
         self.loop_type = None  # 'queue', 'song', or None
         self.current_song = None
+        self.start_time = None  # NEW: Track song start time
         self.history = []
         self.downloading = False
         self.data_usage = 0
@@ -187,16 +212,18 @@ class GuildState:
 guild_states = defaultdict(GuildState)
 
 
+# UPDATED MockContext to handle channels
 class MockContext:
-    def __init__(self, guild):
+    def __init__(self, guild, channel=None):  # MODIFIED: Added channel parameter
         self.guild = guild
         self.voice_client = guild.voice_client
         self.author = guild.me
         self.bot = guild.me
+        self.channel = channel  # NEW: Store channel reference
         self.message = type('MockMessage', (), {
             'guild': guild,
             'author': guild.me,
-            'channel': None
+            'channel': channel
         })()
 
     async def send(self, content):
@@ -224,6 +251,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
+bot.remove_command('help')  # disables default help text
 
 
 class AdminCLI(Cmd):
@@ -497,6 +525,32 @@ class AdminCLI(Cmd):
 
         self._safe_run_coroutine(resume())
 
+    def do_queue(self, arg):
+        """Send queue status to channel: queue <guild_bot_id> <channel_bot_id>"""
+        args = arg.split()
+        if len(args) < 2:
+            print("Usage: queue <guild_bot_id> <channel_bot_id>")
+            return
+
+        guild_id = self.resolve_guild(args[0])
+        channel_id = self.resolve_channel(args[1])
+
+        async def send_queue():
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                print("Guild not found")
+                return
+
+            channel = guild.get_channel(channel_id)
+            if not channel or not isinstance(channel, discord.TextChannel):
+                print("Invalid text channel")
+                return
+
+            ctx = MockContext(guild, channel=channel)  # Pass channel to MockContext
+            await self.bot.get_command('queue').callback(ctx)
+
+        self._safe_run_coroutine(send_queue())
+
     def do_shuffle(self, arg):
         """Shuffle queue: shuffle <guild_bot_id>"""
         if not arg:
@@ -589,6 +643,7 @@ class AdminCLI(Cmd):
         """Exit the CLI"""
         return True
 
+
 # Core functionality
 @bot.event
 async def on_ready():
@@ -614,14 +669,23 @@ async def play_next(ctx):
         elif not state.queue.empty():
             song = await state.queue.get()
             state.history.append(song)
+            async with state.lock:
+                if state.queue_list:
+                    state.queue_list.pop(0)
         elif state.loop_type == 'queue' and state.history:
             for track in state.history:
                 await state.queue.put(track)
+                async with state.lock:
+                    state.queue_list.append(track)
             song = await state.queue.get()
+            async with state.lock:
+                if state.queue_list:
+                    state.queue_list.pop(0)
         else:
             return
 
         state.current_song = song
+        state.start_time = time.time()  # NEW: Track start time
 
         # Verify file exists
         if not os.path.exists(song['url']):
@@ -642,6 +706,108 @@ async def play_next(ctx):
     except Exception as e:
         logger.error(f"Playback error: {traceback.format_exc()}")
         await ctx.send("Playback error occurred")
+
+
+@bot.command()
+async def join(ctx):
+    """Join the user's voice channel"""
+    try:
+        # Check if user is in a voice channel
+        if not ctx.author.voice or not ctx.author.voice.channel:
+            await ctx.send("❗ You need to be in a voice channel to use this command!")
+            return
+
+        channel = ctx.author.voice.channel
+
+        # Check permissions
+        if not channel.permissions_for(ctx.guild.me).connect:
+            await ctx.send("❌ I don't have permission to join that voice channel!")
+            return
+
+        # Handle existing connection
+        if ctx.voice_client:
+            if ctx.voice_client.channel == channel:
+                await ctx.send(f"ℹ️ Already connected to {channel.name}")
+                return
+            await ctx.voice_client.move_to(channel)
+        else:
+            await channel.connect()
+
+        await ctx.send(f"✅ Joined {channel.name}")
+
+    except discord.ClientException as e:
+        await ctx.send(f"❌ Connection error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Join error: {traceback.format_exc()}")
+        await ctx.send("❌ An error occurred while trying to join the voice channel")
+
+
+@bot.command()
+async def help(ctx):
+    """Show all available user commands"""
+    help_text = [
+        "**Folda Tunez Bot Commands**\n",
+        "🎵 **Music Commands**:",
+        f"`{BOT_PREFIX}join` - Join your voice channel",
+        f"`{BOT_PREFIX}stream <url>` - Stream from YouTube/SoundCloud/etc",
+        f"`{BOT_PREFIX}queue` - Show current queue with timestamps",
+        f"`{BOT_PREFIX}skip` - Skip current track",
+        f"`{BOT_PREFIX}pause` - Pause playback",
+        f"`{BOT_PREFIX}resume` - Resume playback",
+        f"`{BOT_PREFIX}stop` - Stop playback and clear queue",
+        f"`{BOT_PREFIX}shuffle` - Shuffle the queue",
+        f"`{BOT_PREFIX}loop` - Toggle queue/song looping",
+        f"`{BOT_PREFIX}playlist_local <file>` - Load local playlist",
+        "\n📊 **Info Commands**:",
+        f"`{BOT_PREFIX}usage` - Show data usage and uptime",
+        f"`{BOT_PREFIX}help_me` - Show this help message",
+        "\n⚙️ **Examples**:",
+        f"`{BOT_PREFIX}stream https://youtu.be/dQw4w9WgXcQ`",
+        f"`{BOT_PREFIX}playlist_local my_playlist.txt`",
+        "\nNeed admin help? Contact your server moderators!"
+    ]
+
+    try:
+        await ctx.send("\n".join(help_text))
+    except discord.HTTPException as e:
+        await ctx.send("📜 Command list is too long! Please check channel permissions.")
+        logger.error(f"Help command error: {str(e)}")
+
+
+# NEW QUEUE COMMAND
+@bot.command()
+async def queue(ctx):
+    """Show current queue with playback information"""
+    state = guild_states[ctx.guild.id]
+
+    if not state.current_song and not state.queue_list:
+        await ctx.send("Queue is empty")
+        return
+
+    message = []
+
+    # Current song
+    if state.current_song:
+        elapsed = int(time.time() - state.start_time)
+        elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"
+        duration = state.current_song['duration']
+        duration_str = f"{duration // 60}:{duration % 60:02d}" if duration > 0 else "Unknown"
+        message.append(
+            f"**Now Playing:** {state.current_song['title']}\n"
+            f"`{elapsed_str}/{duration_str}` | Requested by {state.current_song['requester']}"
+        )
+
+    # Upcoming songs
+    if state.queue_list:
+        message.append("\n**Upcoming:**")
+        for idx, song in enumerate(state.queue_list, 1):
+            duration_str = f"{song['duration'] // 60}:{song['duration'] % 60:02d}" if song[
+                                                                                          'duration'] > 0 else "Unknown"
+            message.append(
+                f"{idx}. {song['title']} ({duration_str}) | {song['requester']}"
+            )
+
+    await ctx.send("\n".join(message))
 
 
 @bot.command()
@@ -681,13 +847,17 @@ async def stream(ctx, url: str):
             )
             filepath = ydl.prepare_filename(info).replace('.webm', '.mp3')
 
-        # Update queue
+        # Update queue with additional metadata
         state = guild_states[ctx.guild.id]
+        song = {
+            'title': info.get('title', 'Unknown Track'),
+            'url': os.path.abspath(filepath),
+            'requester': ctx.author.display_name,  # NEW
+            'duration': info.get('duration', 0)  # NEW
+        }
         async with state.lock:
-            await state.queue.put({
-                'title': info.get('title', 'Unknown Track'),
-                'url': os.path.abspath(filepath)
-            })
+            await state.queue.put(song)
+            state.queue_list.append(song)  # NEW
 
         await ctx.send(f"✅ Added: {info['title']}")
 
@@ -747,6 +917,7 @@ async def download_and_queue_background(ctx, url):
         logger.info(f"Background download complete: {info['title']}")
     except Exception as e:
         logger.error(f"Background download failed for {url}: {e}")
+
 
 @bot.command()
 async def skip(ctx):
@@ -833,6 +1004,9 @@ async def shuffle(ctx):
     for item in items:
         await state.queue.put(item)
 
+    async with state.lock:  # NEW
+        state.queue_list = items.copy()
+
     await ctx.send("Queue shuffled")
 
 
@@ -857,7 +1031,15 @@ async def playlist_local(ctx, filename: str):
 
         for song_path in songs:
             if os.path.exists(song_path):
-                await state.queue.put({'title': os.path.basename(song_path), 'url': song_path})
+                song = {
+                    'title': os.path.basename(song_path),
+                    'url': song_path,
+                    'requester': ctx.author.display_name,  # NEW
+                    'duration': 0  # Placeholder for local files
+                }
+                async with state.lock:
+                    await state.queue.put(song)
+                    state.queue_list.append(song)  # NEW
             else:
                 await ctx.send(f"File not found: {song_path}")
 
@@ -896,4 +1078,4 @@ async def on_guild_join(guild):
 
 
 if __name__ == "__main__":
-    bot.run('YOUR_TOKEN_HERE')
+    bot.run('YOUR_KEY_HERE')
