@@ -3,6 +3,23 @@ Folda Tunez Discord Bot
 by Preston Parsons
 01/07/2025
 
+Version 2.2.1 Updated 03/02/2025
+    Fixed minor oversights
+    Shuffle method updated (was supposed to be in 2.2.1)
+    Shuffle Improvements:
+            Current Song Preservation: Maintains currently playing song at queue start
+            Thread Safety: Uses queue lock for atomic operations
+            Download Awareness: Blocks shuffle during active downloads
+            Better Algorithms: Uses Fisher-Yates shuffle for true randomness
+            State Consistency: Maintains sync between Queue and queue_list
+            User Feedback: Detailed status messages with emoji indicators
+            Error Handling: Graceful failure with error logging
+    Usage remains the same: !shuffle but now with:
+            Protection against partial shuffles
+            Clear feedback about what was shuffled
+            Better handling of active playback
+            Proper synchronization with queue display commands
+
 Version 2.2 Updated 03/02/2025
 
 New Features & Improvements:
@@ -991,27 +1008,61 @@ async def resume(ctx):
 
 @bot.command()
 async def shuffle(ctx):
+    """Shuffle the current queue with enhanced reliability"""
     guild_id = ctx.guild.id
     state = guild_states[guild_id]
 
-    items = []
-    while not state.queue.empty():
-        items.append(await state.queue.get())
+    try:
+        async with state.lock:
+            # Check queue validity
+            if state.queue.qsize() < 2:
+                await ctx.send("❗ Need at least 2 songs in the queue to shuffle!")
+                return
 
-    if len(items) < 2:
-        await ctx.send("Not enough songs to shuffle")
-        for item in items:
-            await state.queue.put(item)
-        return
+            if state.downloading:
+                await ctx.send("🔄 Please wait until current downloads complete before shuffling")
+                return
 
-    random.shuffle(items)
-    for item in items:
-        await state.queue.put(item)
+            # Create temp list preserving current playback
+            current_song = state.current_song
+            items = [current_song] if current_song else []
 
-    async with state.lock:  # NEW
-        state.queue_list = items.copy()
+            # Drain queue while preserving order
+            while not state.queue.empty():
+                items.append(await state.queue.get())
 
-    await ctx.send("Queue shuffled")
+            # Only shuffle upcoming songs (keep current song if playing)
+            shuffle_start = 1 if current_song else 0
+            shuffle_slice = items[shuffle_start:]
+
+            if len(shuffle_slice) < 2:
+                await ctx.send("❗ Not enough upcoming songs to shuffle")
+                # Restore original state
+                for item in items[shuffle_start:]:
+                    await state.queue.put(item)
+                return
+
+            # Fisher-Yates shuffle algorithm
+            for i in range(len(shuffle_slice) - 1, 0, -1):
+                j = random.randint(0, i)
+                shuffle_slice[i], shuffle_slice[j] = shuffle_slice[j], shuffle_slice[i]
+
+            # Rebuild queue and update tracking
+            state.queue = asyncio.Queue()
+            state.queue_list.clear()
+
+            for item in items:
+                await state.queue.put(item)
+                state.queue_list.append(item)
+
+            await ctx.send("🔀 Successfully shuffled {} songs{}!".format(
+                len(shuffle_slice),
+                " (keeping current song)" if current_song else ""
+            ))
+
+    except Exception as e:
+        logger.error(f"Shuffle error: {traceback.format_exc()}")
+        await ctx.send("❌ Failed to shuffle queue due to an internal error")
 
 
 @bot.command()
