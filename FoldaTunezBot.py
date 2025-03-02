@@ -179,6 +179,7 @@ guild_bot_ids = {}
 channel_bot_ids = {}
 next_guild_id = 1
 next_channel_id = 1
+last_join_channels = {}
 
 # Configuration
 FFMPEG_PATH = "C:/ffmpeg/bin/ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
@@ -735,6 +736,9 @@ async def join(ctx):
 
         await ctx.send(f"✅ Joined {channel.name}")
 
+        last_join_channels[ctx.guild.id] = ctx.channel  # Store text channel
+        await ctx.send(f"✅ Joined {channel.name}")
+
     except discord.ClientException as e:
         await ctx.send(f"❌ Connection error: {str(e)}")
     except Exception as e:
@@ -1066,16 +1070,22 @@ async def usage(ctx):
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member == bot.user and before.channel is None and after.channel is not None:
-        await after.channel.send("Use !help_me for commands")
+        guild_id = member.guild.id
+        if guild_id in last_join_channels:
+            text_channel = last_join_channels.pop(guild_id)
+            try:
+                await text_channel.send("Use `!help` for available commands!")
+            except (discord.Forbidden, discord.NotFound):
+                pass  # Channel deleted or no permissions
 
 
 @bot.event
 async def on_guild_join(guild):
     for channel in guild.text_channels:
         if channel.permissions_for(guild.me).send_messages:
-            await channel.send("Hello! Use !help_me for commands")
+            await channel.send("Hello! Use !help for commands")
             break
 
 
 if __name__ == "__main__":
-    bot.run('YOUR_KEY_HERE')
+    bot.run('YOUR_TOKEN_HERE')
