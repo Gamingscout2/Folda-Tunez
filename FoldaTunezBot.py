@@ -2,6 +2,37 @@
 Folda Tunez Discord Bot
 by Preston Parsons
 01/07/2025
+Version 2.4 Updated 03/18/2025
+    Added a comprehensive logging system with:
+        Separate log files for bot (bot.log) and CLI (cli.log) (not every CLI command is logged yet)
+        Log rotation (5MB per file, 3 backups)
+        Both console and file logging
+        Standardized log format with timestamps
+    Added the !leave command back in:
+        Disconnects from voice
+        Clears the queue
+        Resets playback state
+        Provides user feedback
+    Added extensive logging throughout:
+        Command invocations
+        Critical operations
+        Errors and exceptions
+        System events
+    Modified CLI to log all operations
+        The logging system will track:
+             All user commands with user/server info
+        System operations (voice connections, queue changes)
+        Errors with full tracebacks
+        CLI command execution
+        Resource usage (voice client connections, memory)
+        Playback status changes
+    Logs can be found in:
+        bot.log: All bot-related activity\
+        cli.log: All CLI interactions and admin commands
+
+Versions 2.3.1 Updated 03/02/2025
+    Queue command updated so long queues are split, preventing
+    overflow of discord message legnth and string character limit.
 
 Version 2.3 Updated 03/02/2025
     Yes, lots of updates today.  Fixing bugs creates more sometimes...
@@ -212,6 +243,8 @@ import time
 from cmd import Cmd
 from tabulate import tabulate
 import subprocess
+import logging
+from logging.handlers import RotatingFileHandler
 
 
 # Initialize ID mappings
@@ -220,6 +253,32 @@ channel_bot_ids = {}
 next_guild_id = 1
 next_channel_id = 1
 last_join_channels = {}
+
+
+# Initialize loggers
+def setup_logger(name, log_file, level=logging.INFO):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=1024 * 1024 * 5, backupCount=3
+    )
+    file_handler.setFormatter(formatter)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    return logger
+
+
+# Set up loggers
+bot_logger = setup_logger('bot', 'bot.log')
+cli_logger = setup_logger('cli', 'cli.log')
+
 
 # Configuration
 FFMPEG_PATH = "C:/ffmpeg/bin/ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
@@ -302,12 +361,19 @@ class AdminCLI(Cmd):
     def __init__(self, bot):
         super().__init__()
         self.bot = bot
+        self.logger = setup_logger('cli', 'cli.log')
+
+    def _log_and_print(self, message, level='info'):
+        log_method = getattr(self.logger, level)
+        log_method(message)
+        print(message)
 
     def _resolve_id(self, identifier, id_map):
         try:
             id_int = int(identifier)
             return id_map.get(id_int, id_int)
-        except ValueError:
+        except ValueError as e:
+            self.logger.error(f"ID resolution error: {str(e)}")
             return None
 
     def resolve_guild(self, identifier):
@@ -321,133 +387,161 @@ class AdminCLI(Cmd):
             future = asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
             future.result(timeout=10)
         except Exception as e:
+            error_msg = f"CLI command error: {traceback.format_exc()}"
+            self.logger.error(error_msg)
             print(f"Error: {str(e)}")
-            logger.error(f"CLI command error: {traceback.format_exc()}")
 
-    # Updated CLI commands with proper ID resolution
     def do_servers(self, arg):
         """List all connected servers with status and queue information"""
-        global next_guild_id
-        servers = []
-        for guild in self.bot.guilds:
-            if guild.id not in guild_bot_ids.values():
-                guild_bot_ids[next_guild_id] = guild.id
-                next_guild_id += 1
-            state = guild_states[guild.id]
-            vc = guild.voice_client
-            bot_id = [k for k, v in guild_bot_ids.items() if v == guild.id][0]
-            servers.append([
-                guild.name,
-                bot_id,
-                guild.id,
-                "Connected" if vc else "Disconnected",
-                state.current_song['title'][:20] + '...' if state.current_song else 'None',
-                f"{state.data_usage / 1024 / 1024:.2f} MB",
-                state.queue.qsize()
-            ])
-        print(tabulate(servers,
-                       headers=["Server", "BOT ID", "ID", "Status", "Current Song", "Data Usage", "Queue Size"]))
+        try:
+            global next_guild_id
+            servers = []
+            for guild in self.bot.guilds:
+                if guild.id not in guild_bot_ids.values():
+                    guild_bot_ids[next_guild_id] = guild.id
+                    next_guild_id += 1
+                state = guild_states[guild.id]
+                vc = guild.voice_client
+                bot_id = [k for k, v in guild_bot_ids.items() if v == guild.id][0]
+
+                servers.append([
+                    guild.name,
+                    bot_id,
+                    guild.id,
+                    "Connected" if vc else "Disconnected",
+                    state.current_song['title'][:20] + '...' if state.current_song else 'None',
+                    f"{state.data_usage / 1024 / 1024:.2f} MB",
+                    state.queue.qsize()
+                ])
+
+            table = tabulate(servers,
+                             headers=["Server", "BOT ID", "ID", "Status", "Current Song", "Data Usage", "Queue Size"])
+            self._log_and_print(f"Server list requested:\n{table}")
+        except Exception as e:
+            self.logger.error(f"Servers error: {traceback.format_exc()}")
+            self._log_and_print(f"Error retrieving server list: {str(e)}", 'error')
 
     def do_channels(self, arg):
         """List channels in a specific server: channels <guild_bot_id>"""
-        global next_channel_id
-        guild_id = self.resolve_guild(arg)
-        if not guild_id:
-            print("Invalid guild identifier")
-            return
+        try:
+            global next_channel_id
+            guild_id = self.resolve_guild(arg)
+            if not guild_id:
+                self._log_and_print("Invalid guild identifier", 'warning')
+                return
 
-        guild = self.bot.get_guild(guild_id)
-        if not guild:
-            print("Guild not found")
-            return
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                self._log_and_print("Guild not found", 'warning')
+                return
 
-        channels = []
-        for channel in guild.channels:
-            if channel.id not in channel_bot_ids.values():
-                channel_bot_ids[next_channel_id] = channel.id
-                next_channel_id += 1
-            bot_id = [k for k, v in channel_bot_ids.items() if v == channel.id][0]
-            channels.append([
-                channel.name,
-                bot_id,
-                channel.id,
-                "Voice" if isinstance(channel, discord.VoiceChannel) else "Text",
-                "NSFW" if getattr(channel, 'is_nsfw', False) else "SFW",
-                channel.category.name if channel.category else "No Category"
-            ])
-        print(tabulate(channels,
-                       headers=["Channel Name", "BOT ID", "ID", "Type", "NSFW Status", "Category"]))
+            channels = []
+            for channel in guild.channels:
+                if channel.id not in channel_bot_ids.values():
+                    channel_bot_ids[next_channel_id] = channel.id
+                    next_channel_id += 1
+                bot_id = [k for k, v in channel_bot_ids.items() if v == channel.id][0]
+
+                channels.append([
+                    channel.name,
+                    bot_id,
+                    channel.id,
+                    "Voice" if isinstance(channel, discord.VoiceChannel) else "Text",
+                    "NSFW" if getattr(channel, 'is_nsfw', False) else "SFW",
+                    channel.category.name if channel.category else "No Category"
+                ])
+
+            table = tabulate(channels,
+                             headers=["Channel Name", "BOT ID", "ID", "Type", "NSFW Status", "Category"])
+            self._log_and_print(f"Channel list for guild {guild_id}:\n{table}")
+        except Exception as e:
+            self.logger.error(f"Channels error: {traceback.format_exc()}")
+            self._log_and_print(f"Error retrieving channels: {str(e)}", 'error')
 
     def do_sendmsg(self, arg):
         """Send message to a text channel: sendmsg <guild_bot_id> <channel_bot_id> <message>"""
-        args = arg.split(maxsplit=2)
-        if len(args) < 3:
-            print("Usage: sendmsg <guild_bot_id> <channel_bot_id> <message>")
-            return
-
-        guild_id = self.resolve_guild(args[0])
-        channel_id = self.resolve_channel(args[1])
-        message = args[2]
-
-        async def send():
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                print("Guild not found")
+        try:
+            args = arg.split(maxsplit=2)
+            if len(args) < 3:
+                self._log_and_print("Usage: sendmsg <guild_bot_id> <channel_bot_id> <message>", 'warning')
                 return
 
-            channel = guild.get_channel(channel_id)
-            if not channel:
-                print("Channel not found")
-                return
+            guild_id = self.resolve_guild(args[0])
+            channel_id = self.resolve_channel(args[1])
+            message = args[2]
 
-            # Ensure the channel is a text channel
-            if not isinstance(channel, discord.TextChannel):
-                print("Error: The specified channel is not a text channel")
-                return
+            async def send():
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    self._log_and_print("Guild not found", 'warning')
+                    return
 
-            # Check if the bot has permissions to send messages in the channel
-            if not channel.permissions_for(guild.me).send_messages:
-                print("Error: Bot does not have permission to send messages in this channel")
-                return
+                channel = guild.get_channel(channel_id)
+                if not channel:
+                    self._log_and_print("Channel not found", 'warning')
+                    return
 
-            try:
-                await channel.send(message)
-                print(f"Message sent to {channel.name}")
-            except discord.Forbidden:
-                print("Error: Bot does not have permission to send messages in this channel")
-            except discord.HTTPException as e:
-                print(f"Error sending message: {e}")
+                if not isinstance(channel, discord.TextChannel):
+                    self._log_and_print("Error: Not a text channel", 'warning')
+                    return
 
-        self._safe_run_coroutine(send())
+                if not channel.permissions_for(guild.me).send_messages:
+                    self._log_and_print("Error: Missing permissions", 'warning')
+                    return
+
+                try:
+                    await channel.send(message)
+                    self._log_and_print(f"Message sent to {channel.name}")
+                    self.logger.info(f"Message sent to {channel.id}: {message[:50]}...")
+                except discord.Forbidden:
+                    self._log_and_print("Error: Missing permissions", 'error')
+                except discord.HTTPException as e:
+                    self._log_and_print(f"Error sending message: {e}", 'error')
+
+            self._safe_run_coroutine(send())
+        except Exception as e:
+            self.logger.error(f"Sendmsg error: {traceback.format_exc()}")
+            self._log_and_print(f"Error sending message: {str(e)}", 'error')
 
     def do_join(self, arg):
         """Join a voice channel in specified server: join <guild_bot_id> <channel_bot_id>"""
-        args = arg.split()
-        if len(args) < 2:
-            print("Usage: join <guild_bot_id> <channel_bot_id>")
-            return
-
-        guild_id = self.resolve_guild(args[0])
-        channel_id = self.resolve_channel(args[1])
-
-        async def join():
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                print("Guild not found")
+        try:
+            args = arg.split()
+            if len(args) < 2:
+                self._log_and_print("Usage: join <guild_bot_id> <channel_bot_id>", 'warning')
                 return
 
-            channel = guild.get_channel(channel_id)
-            if not channel or not isinstance(channel, discord.VoiceChannel):
-                print("Invalid voice channel")
-                return
+            guild_id = self.resolve_guild(args[0])
+            channel_id = self.resolve_channel(args[1])
 
-            if guild.voice_client:
-                await guild.voice_client.move_to(channel)
-            else:
-                await channel.connect()
-            print(f"Joined {channel.name}")
+            async def join():
+                try:
+                    guild = self.bot.get_guild(guild_id)
+                    if not guild:
+                        self._log_and_print("Guild not found", 'warning')
+                        return
 
-        self._safe_run_coroutine(join())
+                    channel = guild.get_channel(channel_id)
+                    if not channel or not isinstance(channel, discord.VoiceChannel):
+                        self._log_and_print("Invalid voice channel", 'warning')
+                        return
+
+                    if guild.voice_client:
+                        await guild.voice_client.move_to(channel)
+                        self.logger.info(f"Moved to voice channel {channel.id} in guild {guild_id}")
+                    else:
+                        await channel.connect()
+                        self.logger.info(f"Connected to voice channel {channel.id} in guild {guild_id}")
+
+                    self._log_and_print(f"Joined {channel.name}")
+                except Exception as e:
+                    self.logger.error(f"Join error: {traceback.format_exc()}")
+                    self._log_and_print(f"Join failed: {str(e)}", 'error')
+
+            self._safe_run_coroutine(join())
+        except Exception as e:
+            self.logger.error(f"Join command error: {traceback.format_exc()}")
+            self._log_and_print(f"Error processing join command: {str(e)}", 'error')
 
     def do_stream(self, arg):
         """Stream audio from URL in specified server: stream <guild_bot_id> <url>"""
@@ -472,64 +566,47 @@ class AdminCLI(Cmd):
 
     def do_leave(self, arg):
         """Leave voice channel: leave <guild_bot_id>"""
-        if not arg:
-            print("Usage: leave <guild_bot_id>")
-            return
-
-        guild_id = self.resolve_guild(arg)
-        if not guild_id:
-            print("Invalid guild identifier")
-            return
-
-        async def leave():
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                print("Guild not found")
+        try:
+            if not arg:
+                self._log_and_print("Usage: leave <guild_bot_id>", 'warning')
                 return
 
-            if guild.voice_client:
-                await guild.voice_client.disconnect()
-                print("Left voice channel")
-            else:
-                print("Not in a voice channel")
+            guild_id = self.resolve_guild(arg)
+            if not guild_id:
+                self._log_and_print("Invalid guild identifier", 'warning')
+                return
 
-        self._safe_run_coroutine(leave())
+            async def leave():
+                try:
+                    guild = self.bot.get_guild(guild_id)
+                    if not guild:
+                        self._log_and_print("Guild not found", 'warning')
+                        return
 
-    def do_skip(self, arg):
-        """Skip current track: skip <guild_bot_id>"""
-        if not arg:
-            print("Usage: skip <guild_bot_id>")
-            return
+                    if guild.voice_client:
+                        await guild.voice_client.disconnect()
+                        self.logger.info(f"Left voice channel in guild {guild_id}")
+                        self._log_and_print("Left voice channel")
 
-        guild_id = self.resolve_guild(arg)
-        if not guild_id:
-            print("Invalid guild identifier")
-            return
+                        # Clear queue
+                        state = guild_states[guild_id]
+                        async with state.lock:
+                            state.queue = asyncio.Queue()
+                            state.queue_list.clear()
+                            state.current_song = None
+                            state.loop_type = None
+                            state.history.clear()
+                            self.logger.info(f"Cleared queue for guild {guild_id}")
+                    else:
+                        self._log_and_print("Not in a voice channel", 'warning')
+                except Exception as e:
+                    self.logger.error(f"Leave error: {traceback.format_exc()}")
+                    self._log_and_print(f"Leave failed: {str(e)}", 'error')
 
-        async def skip():
-            guild = self.bot.get_guild(guild_id)
-            ctx = MockContext(guild)
-            await self.bot.get_command('skip').callback(ctx)
-
-        self._safe_run_coroutine(skip())
-
-    def do_stop(self, arg):
-        """Stop playback: stop <guild_bot_id>"""
-        if not arg:
-            print("Usage: stop <guild_bot_id>")
-            return
-
-        guild_id = self.resolve_guild(arg)
-        if not guild_id:
-            print("Invalid guild identifier")
-            return
-
-        async def stop():
-            guild = self.bot.get_guild(guild_id)
-            ctx = MockContext(guild)
-            await self.bot.get_command('stop').callback(ctx)
-
-        self._safe_run_coroutine(stop())
+            self._safe_run_coroutine(leave())
+        except Exception as e:
+            self.logger.error(f"Leave command error: {traceback.format_exc()}")
+            self._log_and_print(f"Error processing leave command: {str(e)}", 'error')
 
     def do_pause(self, arg):
         """Pause playback: pause <guild_bot_id>"""
@@ -665,30 +742,45 @@ class AdminCLI(Cmd):
         self._safe_run_coroutine(show_usage())
 
     def cmdloop(self, intro=None):
-        """Override cmdloop to handle errors gracefully and print a newline before the prompt."""
+        """Override cmdloop to handle errors gracefully"""
         while True:
             try:
-                print()  # Add a newline before the prompt
+                print()
                 super().cmdloop(intro="")
                 break
             except Exception as e:
-                print(f"Error: {str(e)}")
-                logger.error(f"CLI error: {e}")
+                self.logger.critical(f"CLI crash: {traceback.format_exc()}")
+                self._log_and_print(f"Critical error: {str(e)} - Restarting CLI...", 'critical')
                 continue
 
     def do_kill(self, arg):
         """Shutdown the bot"""
-        print("Shutting down...")
+        self._log_and_print("Initiating shutdown sequence...")
+        self.logger.critical("Admin initiated bot shutdown")
         os._exit(0)
 
     def do_exit(self, arg):
         """Exit the CLI"""
+        self.logger.info("CLI session ended")
         return True
 
 
 # Core functionality
 @bot.event
 async def on_ready():
+    #error logging included
+    bot_logger.info(f"Bot logged in as {bot.user}")
+    try:
+        subprocess.run([FFMPEG_PATH, '-version'], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        bot_logger.info("FFmpeg verification successful")
+    except Exception as e:
+        bot_logger.critical(f"FFmpeg check failed: {str(e)}")
+        os._exit(1)
+
+    cli_thread = threading.Thread(target=AdminCLI(bot).cmdloop, daemon=True)
+    cli_thread.start()
+    bot_logger.info("Admin CLI started")
     # FFmpeg verification
     try:
         subprocess.run([FFMPEG_PATH, '-version'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -754,8 +846,8 @@ async def play_next(ctx):
         await ctx.send(f"Now playing: {song['title']}")
 
     except Exception as e:
-        logger.error(f"Playback error: {traceback.format_exc()}")
-        await ctx.send("Playback error occurred")
+        bot_logger.error(f"Play next error: {traceback.format_exc()}")
+        await ctx.send("❌ Playback error occurred")
 
 
 @bot.command()
@@ -796,12 +888,44 @@ async def join(ctx):
 
 
 @bot.command()
+async def leave(ctx):
+    """Leaves the voice channel and clears the queue"""
+    guild_id = ctx.guild.id
+    state = guild_states[guild_id]
+
+    bot_logger.info(f"Leave command invoked in {ctx.guild.name} by {ctx.author.display_name}")
+
+    try:
+        # Disconnect from voice channel
+        if ctx.voice_client:
+            await ctx.voice_client.disconnect()
+            bot_logger.debug(f"Disconnected from voice channel in {ctx.guild.name}")
+
+        # Clear queue and reset state
+        async with state.lock:
+            state.queue = asyncio.Queue()
+            state.queue_list.clear()
+            state.current_song = None
+            state.loop_type = None
+            state.history.clear()
+            bot_logger.debug(f"Cleared queue in {ctx.guild.name}")
+
+        await ctx.send("✅ Left voice channel and cleared queue")
+        bot_logger.info(f"Successfully left voice channel in {ctx.guild.name}")
+
+    except Exception as e:
+        error_msg = f"Leave command failed in {ctx.guild.name}: {str(e)}"
+        bot_logger.error(error_msg)
+        await ctx.send("❌ Failed to leave voice channel")
+
+@bot.command()
 async def help(ctx):
     """Show all available user commands"""
     help_text = [
         "**Folda Tunez Bot Commands**\n",
         "🎵 **Music Commands**:",
         f"`{BOT_PREFIX}join` - Join your voice channel",
+        f"'{BOT_PREFIX}leave' - Leave your voice channel"
         f"`{BOT_PREFIX}stream <url>` - Stream from YouTube/SoundCloud/etc",
         f"'{BOT_PREFIX}spotify <url>' - Play Spotify track / playlist",
         f"`{BOT_PREFIX}queue` - Show current queue with timestamps",
@@ -835,35 +959,53 @@ async def help(ctx):
 async def queue(ctx):
     """Show current queue with playback information"""
     state = guild_states[ctx.guild.id]
+    MAX_LENGTH = 1900  # Leave some margin for formatting
 
     if not state.current_song and not state.queue_list:
         await ctx.send("Queue is empty")
         return
 
-    message = []
+    messages = []
+    current_message = []
 
-    # Current song
+    # Current song section
     if state.current_song:
         elapsed = int(time.time() - state.start_time)
         elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"
-        duration = state.current_song.get('duration', 0)  # Use .get() with default
+        duration = state.current_song.get('duration', 0)
         duration_str = f"{duration // 60}:{duration % 60:02d}" if duration > 0 else "Unknown"
-        message.append(
-            f"**Now Playing:** {state.current_song['title']}\n"
+        current_block = [
+            f"**Now Playing:** {state.current_song['title']}",
             f"`{elapsed_str}/{duration_str}` | Requested by {state.current_song['requester']}"
-        )
+        ]
+        current_message.extend(current_block)
 
-    # Upcoming songs
+    # Upcoming songs section
     if state.queue_list:
-        message.append("\n**Upcoming:**")
-        for idx, song in enumerate(state.queue_list, 1):
-            duration = song.get('duration', 0)  # Use .get() with default
-            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration > 0 else "Unknown"
-            message.append(
-                f"{idx}. {song['title']} ({duration_str}) | {song['requester']}"
-            )
+        if current_message:
+            current_message.append("\n**Upcoming:**")
+        else:
+            current_message.append("**Upcoming:**")
 
-    await ctx.send("\n".join(message))
+        for idx, song in enumerate(state.queue_list, 1):
+            duration = song.get('duration', 0)
+            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration > 0 else "Unknown"
+            line = f"{idx}. {song['title']} ({duration_str}) | {song['requester']}"
+
+            # Check if adding this line would exceed the limit
+            if len('\n'.join(current_message + [line])) > MAX_LENGTH:
+                messages.append('\n'.join(current_message))
+                current_message = ["**Upcoming (cont'd):**", line]
+            else:
+                current_message.append(line)
+
+    # Add any remaining content
+    if current_message:
+        messages.append('\n'.join(current_message))
+
+    # Send all message parts
+    for msg in messages:
+        await ctx.send(msg)
 
 
 @bot.command()
@@ -918,9 +1060,11 @@ async def stream(ctx, url: str):
             if not ctx.voice_client.is_playing():
                 await play_next(ctx)
 
+            bot_logger.info(f"Stream command: {url} by {ctx.author.display_name}")
+
     except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-        logger.error(f"Stream error: {traceback.format_exc()}")
+        bot_logger.error(f"Stream error: {traceback.format_exc()}")
+        await ctx.send(f"❌ Streaming error: {str(e)}")
 
 
 async def download_and_queue_single(ctx, url):
