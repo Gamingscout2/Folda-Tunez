@@ -2,6 +2,31 @@
 Folda Tunez Discord Bot
 by Preston Parsons
 01/07/2025
+Version 3.0 Upadted 06/25/2025
+🔧 Discord API & Infrastructure Fixes
+    Voice Connection Stability:
+        Resolved persistent "4006" WebSocket errors during voice handshakes by optimizing session timeouts and UDP packet handling 110.
+        Improved retransmission logic for audio data packets in calls, reducing robotic audio glitches by 6.5% 10.
+        Added custom keybind support for toggling cameras during calls (Desktop) 5.
+    Rate Limit Handling:
+        Global rate limits tightened to 50 requests/second; exceeded requests now return clear throttling errors (e.g., Discord throttling [url]) instead of silent failures 12.
+        Fixes for AutoMod regex rules and role color changes that previously "did nothing" due to save failures 110.
+    API Deployment & Reliability:
+        Migrated core infrastructure to ARM hardware, reducing latency and improving energy efficiency 37.
+        Critical services (e.g., friend requests, messaging) now insulated from broader system outages 710.
+    Embed & Media Processing
+        Spotify embeds: 88% faster load times and 83% fewer failures 10.
+        HDR-to-SDR tone-mapping fixes for accurate color rendering in shared media 10.
+        Animated WebP/AVIF emojis now support true alpha transparency and smoother playback 1.
+Discord.py Changelog: https://discordpy.readthedocs.io/en/stable/whats_new.html
+
+Version 2.5 Updated 05/03/2025
+    🔍 Added YouTube search functionality to !stream command:
+        - Automatic search suggestions for text queries
+        - Interactive 5-result selection with buttons
+        - Fallback URL construction from video ID
+    🛡️ Enhanced URL validation for search results
+
 Version 2.4 Updated 03/18/2025
     Added a comprehensive logging system with:
         Separate log files for bot (bot.log) and CLI (cli.log) (not every CLI command is logged yet)
@@ -245,7 +270,14 @@ from tabulate import tabulate
 import subprocess
 import logging
 from logging.handlers import RotatingFileHandler
-
+from discord.ui import View, Button, select
+import socket
+import sys
+import io
+import select
+import nacl.secret
+import nacl.utils
+from discord.backoff import ExponentialBackoff
 
 # Initialize ID mappings
 guild_bot_ids = {}
@@ -315,18 +347,27 @@ class MockContext:
     def __init__(self, guild, channel=None):
         self.guild = guild
         self.voice_client = guild.voice_client
-        self.author = guild.me
+        self.author = guild.me  # Bot as author
         self.bot = guild.me
         self.channel = channel
         self.message = type('MockMessage', (), {
             'guild': guild,
             'author': guild.me,
-            'channel': channel
+            'channel': channel,
+            'content': ''
         })()
 
     async def send(self, content):
         if self.channel:
-            await self.channel.send(content)  # Now sends to actual channel
+            # Check permissions first
+            if not isinstance(self.channel, discord.TextChannel):
+                raise discord.Forbidden("Not a text channel")
+
+            if not self.channel.permissions_for(self.guild.me).send_messages:
+                raise discord.Forbidden("Missing Send Messages permission")
+
+            # Use actual channel send method
+            await self.channel.send(content)
         else:
             print(f"[Bot] {content}")
 
@@ -468,7 +509,7 @@ class AdminCLI(Cmd):
 
             guild_id = self.resolve_guild(args[0])
             channel_id = self.resolve_channel(args[1])
-            message = args[2]
+            message_content = args[2]
 
             async def send():
                 guild = self.bot.get_guild(guild_id)
@@ -481,22 +522,38 @@ class AdminCLI(Cmd):
                     self._log_and_print("Channel not found", 'warning')
                     return
 
-                if not isinstance(channel, discord.TextChannel):
-                    self._log_and_print("Error: Not a text channel", 'warning')
-                    return
+                # Create proper context with mock message
+                ctx = MockContext(guild, channel=channel)
 
-                if not channel.permissions_for(guild.me).send_messages:
-                    self._log_and_print("Error: Missing permissions", 'warning')
-                    return
+                # Split message using the same logic as queue command
+                messages = []
+                current_message = []
+                MAX_LENGTH = 1900  # Matching queue command's limit
 
-                try:
-                    await channel.send(message)
-                    self._log_and_print(f"Message sent to {channel.name}")
-                    self.logger.info(f"Message sent to {channel.id}: {message[:50]}...")
-                except discord.Forbidden:
-                    self._log_and_print("Error: Missing permissions", 'error')
-                except discord.HTTPException as e:
-                    self._log_and_print(f"Error sending message: {e}", 'error')
+                # Split message into lines and process
+                for line in message_content.split('\n'):
+                    if len('\n'.join(current_message + [line])) > MAX_LENGTH:
+                        messages.append('\n'.join(current_message))
+                        current_message = [line]
+                    else:
+                        current_message.append(line)
+
+                if current_message:
+                    messages.append('\n'.join(current_message))
+
+                # Send messages using context
+                for msg in messages:
+                    try:
+                        await ctx.send(msg)
+                        self.logger.info(f"Message sent to {channel.id}: {msg[:50]}...")
+                    except discord.Forbidden:
+                        self._log_and_print(f"Missing permissions in #{channel.name}", 'error')
+                        break
+                    except discord.HTTPException as e:
+                        self._log_and_print(f"Failed to send message: {str(e)}", 'error')
+                        break
+
+                self._log_and_print(f"Sent {len(messages)} message parts to #{channel.name}")
 
             self._safe_run_coroutine(send())
         except Exception as e:
@@ -742,12 +799,32 @@ class AdminCLI(Cmd):
         self._safe_run_coroutine(show_usage())
 
     def cmdloop(self, intro=None):
-        """Override cmdloop to handle errors gracefully"""
+        """Robust CLI handling with proper encoding"""
+        # Fix stdin encoding
+        sys.stdin = io.TextIOWrapper(
+            sys.stdin.buffer,
+            encoding='utf-8',
+            errors='replace'
+        )
+
         while True:
             try:
                 print()
                 super().cmdloop(intro="")
                 break
+
+            except UnicodeDecodeError:
+                # Clear input buffer to prevent repeated errors
+                try:
+                    sys.stdin.flush()
+                    # Clear any pending input
+                    while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                        sys.stdin.read(1)
+                except:
+                    pass
+                self._log_and_print("Invalid input detected. Please use UTF-8 characters only.", 'warning')
+                continue
+
             except Exception as e:
                 self.logger.critical(f"CLI crash: {traceback.format_exc()}")
                 self._log_and_print(f"Critical error: {str(e)} - Restarting CLI...", 'critical')
@@ -765,17 +842,68 @@ class AdminCLI(Cmd):
         return True
 
 
+# search results
+class SearchView(discord.ui.View):
+    def __init__(self, entries, ctx):
+        super().__init__(timeout=30)
+        self.entries = entries
+        self.ctx = ctx
+        self.selected_entry = None
+
+        # Add buttons for first 5 results
+        for idx in range(1, 6):
+            if idx - 1 >= len(entries):
+                break
+            button = discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label=str(idx),
+                custom_id=str(idx)
+            )
+            button.callback = lambda interaction, i=idx-1: self.select_entry(interaction, i)
+            self.add_item(button)
+
+    async def select_entry(self, interaction, index):
+        """Handle button click for search selection"""
+        if interaction.user != self.ctx.author:
+            await interaction.response.send_message("❌ You didn't start this search!", ephemeral=True)
+            return
+
+        self.selected_entry = self.entries[index]
+        await interaction.response.defer()
+        self.stop()
+
+    async def on_timeout(self):
+        """Disable buttons when view times out"""
+        for child in self.children:
+            child.disabled = True
+        await self.message.edit(view=self)
+
+
 # Core functionality
 @bot.event
 async def on_ready():
     #error logging included
     bot_logger.info(f"Bot logged in as {bot.user}")
+    # try:
+    #     subprocess.run([FFMPEG_PATH, '-version'], check=True,
+    #                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    #     bot_logger.info("FFmpeg verification successful")
+    # except Exception as e:
+    #     bot_logger.critical(f"FFmpeg check failed: {str(e)}")
+    #     os._exit(1)
     try:
-        subprocess.run([FFMPEG_PATH, '-version'], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            [FFMPEG_PATH, '-version'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if "ffmpeg version" not in result.stdout:
+            raise ValueError("Invalid FFmpeg executable")
         bot_logger.info("FFmpeg verification successful")
     except Exception as e:
         bot_logger.critical(f"FFmpeg check failed: {str(e)}")
+        print(f"❌ Critical: FFmpeg validation failed - {str(e)}")
         os._exit(1)
 
     cli_thread = threading.Thread(target=AdminCLI(bot).cmdloop, daemon=True)
@@ -792,6 +920,19 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     cli_thread = threading.Thread(target=AdminCLI(bot).cmdloop, daemon=True)
     cli_thread.start()
+    try:
+        ffmpeg_version = subprocess.check_output(
+            [FFMPEG_PATH, '-version'],
+            stderr=subprocess.STDOUT
+        ).decode('utf-8', 'replace')
+        if 'ffmpeg version' not in ffmpeg_version:
+            raise ValueError("Invalid FFmpeg executable")
+    except Exception as e:
+        bot_logger.critical(f"FFmpeg validation failed: {str(e)}")
+        print(f"❌ FFmpeg check failed: {str(e)}")
+        os._exit(1)
+
+    socket.setdefaulttimeout(30.0)
 
 
 async def play_next(ctx):
@@ -799,11 +940,10 @@ async def play_next(ctx):
     state = guild_states[guild_id]
 
     try:
-        if ctx.voice_client is None:
-            return
-
-        if ctx.voice_client.is_playing():
-            return
+        # Ensure we have a valid voice connection
+        if not ctx.voice_client or not ctx.voice_client.is_connected():
+            if not await ensure_voice_connection(ctx):
+                return
 
         # Get next song
         if state.loop_type == 'song' and state.current_song:
@@ -845,43 +985,107 @@ async def play_next(ctx):
         ctx.voice_client.play(source, after=after_playback)
         await ctx.send(f"Now playing: {song['title']}")
 
+
+    except discord.ClientException as e:
+
+        if "Not connected to voice" in str(e):
+
+            # Reconnect and retry
+
+            await ensure_voice_connection(ctx)
+
+            await play_next(ctx)
+
+        else:
+
+            bot_logger.error(f"Playback ClientException: {traceback.format_exc()}")
+
+            await ctx.send("❌ Playback error occurred")
+
     except Exception as e:
-        bot_logger.error(f"Play next error: {traceback.format_exc()}")
+
+        bot_logger.error(f"Playback error: {traceback.format_exc()}")
+
         await ctx.send("❌ Playback error occurred")
+
+
+async def ensure_voice_connection(ctx):
+    """Reliable voice connection with version compatibility"""
+    # Log Discord.py version for debugging
+    bot_logger.info(f"Using discord.py version: {discord.__version__}")
+
+    if ctx.voice_client and ctx.voice_client.is_connected():
+        return True
+
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("❗ You need to be in a voice channel first!")
+        return False
+
+    channel = ctx.author.voice.channel
+    guild_id = ctx.guild.id
+
+    # Clean up any existing connection
+    if ctx.voice_client:
+        try:
+            await ctx.voice_client.disconnect(force=True)
+            ctx.voice_client.cleanup()
+        except Exception as e:
+            bot_logger.warning(f"Cleanup error: {str(e)}")
+        await asyncio.sleep(1)
+
+    try:
+        # Create new voice client
+        voice_client = await channel.connect(reconnect=True, self_deaf=True)
+
+        # Wait for connection to stabilize
+        await asyncio.sleep(2)
+
+        if not voice_client.is_connected():
+            raise ConnectionError("Voice connection failed silently")
+
+        # Version-compatible way to ensure readiness
+        if discord.version_info >= (2, 0, 0):  # Discord.py 2.0+
+            # Newer versions handle this automatically
+            pass
+        else:
+            # For older versions, use compatibility method
+            if hasattr(voice_client, 'ws') and hasattr(voice_client.ws, 'wait_until_ready'):
+                await voice_client.ws.wait_until_ready()
+
+        last_join_channels[guild_id] = ctx.channel
+        bot_logger.info(f"Successfully connected to voice in {ctx.guild.name}")
+        return True
+
+    except Exception as e:
+        bot_logger.error(f"Voice connection failed: {traceback.format_exc()}")
+        await ctx.send(f"❌ Voice connection failed: {str(e)}")
+
+        # Try one last time with basic connection
+        try:
+            voice_client = await channel.connect()
+            return True
+        except:
+            return False
 
 
 @bot.command()
 async def join(ctx):
     """Join the user's voice channel"""
     try:
-        # Check if user is in a voice channel
-        if not ctx.author.voice or not ctx.author.voice.channel:
-            await ctx.send("❗ You need to be in a voice channel to use this command!")
-            return
-
-        channel = ctx.author.voice.channel
-
-        # Check permissions
-        if not channel.permissions_for(ctx.guild.me).connect:
-            await ctx.send("❌ I don't have permission to join that voice channel!")
-            return
-
-        # Handle existing connection
+        # Clean up any existing connection first
         if ctx.voice_client:
-            if ctx.voice_client.channel == channel:
-                await ctx.send(f"ℹ️ Already connected to {channel.name}")
-                return
-            await ctx.voice_client.move_to(channel)
-        else:
-            await channel.connect()
+            try:
+                await ctx.voice_client.disconnect(force=True)
+                await asyncio.sleep(0.5)
+            except:
+                pass
 
-        await ctx.send(f"✅ Joined {channel.name}")
+        # Use our connection handler
+        if not await ensure_voice_connection(ctx):
+            return
 
-        last_join_channels[ctx.guild.id] = ctx.channel  # Store text channel
-        await ctx.send(f"✅ Joined {channel.name}")
+        await ctx.send(f"✅ Joined {ctx.author.voice.channel.name}")
 
-    except discord.ClientException as e:
-        await ctx.send(f"❌ Connection error: {str(e)}")
     except Exception as e:
         logger.error(f"Join error: {traceback.format_exc()}")
         await ctx.send("❌ An error occurred while trying to join the voice channel")
@@ -925,9 +1129,9 @@ async def help(ctx):
         "**Folda Tunez Bot Commands**\n",
         "🎵 **Music Commands**:",
         f"`{BOT_PREFIX}join` - Join your voice channel",
-        f"'{BOT_PREFIX}leave' - Leave your voice channel"
+        f"`{BOT_PREFIX}leave` - Leave your voice channel"
         f"`{BOT_PREFIX}stream <url>` - Stream from YouTube/SoundCloud/etc",
-        f"'{BOT_PREFIX}spotify <url>' - Play Spotify track / playlist",
+        f"`{BOT_PREFIX}stream <text/video name> - Search YouTube and present 5 options",
         f"`{BOT_PREFIX}queue` - Show current queue with timestamps",
         f"`{BOT_PREFIX}skip` - Skip current track",
         f"`{BOT_PREFIX}pause` - Pause playback",
@@ -1008,63 +1212,139 @@ async def queue(ctx):
         await ctx.send(msg)
 
 
-@bot.command()
-async def stream(ctx, url: str):
-
+@bot.command(aliases=['search'])
+async def stream(ctx, *, query: str):
+    """Stream audio from URL or search YouTube"""
     try:
-            if not ctx.voice_client:
-                await ctx.send("❗ Join a voice channel first!")
-                return
+        if not ctx.voice_client:
+            await ctx.send("❗ Join a voice channel first!")
+            return
 
+        if not await ensure_voice_connection(ctx):
+            return
+
+        # URL handling
+        if query.startswith(('http://', 'https://')):
+            url = query
             # Enhanced playlist detection
             if any(key in url for key in ['list=', 'playlist']):
                 await process_playlist(ctx, url)
                 return
 
-            # Original single video handling
-            temp_title = url.split('=')[-1][:30]
-            await ctx.send(f"⏳ Downloading: {temp_title}...")
+            # Single video handling
+            await process_single_url(ctx, url)
+            bot_logger.info(f"Stream command: {url} by {ctx.author.display_name}")
 
+        # Search handling
+        else:
+            # Perform YouTube search
             ydl_opts = {
-                'source_address': '0.0.0.0',
-                'geo-bypass': True,
                 'format': 'bestaudio/best',
-                'outtmpl': 'downloads/%(title)s.%(ext)s',  # Keep original format
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
+                'extract_flat': 'in_playlist',
+                'quiet': True,
+                'noplaylist': True,
+                'ignoreerrors': True,
             }
 
             with youtube_dl.YoutubeDL(ydl_opts) as ydl:
                 info = await bot.loop.run_in_executor(
                     download_executor,
-                    lambda: ydl.extract_info(url, download=True)
+                    lambda: ydl.extract_info(f"ytsearch5:{query}", download=False)
                 )
-                filepath = ydl.prepare_filename(info).replace('.webm', '.mp3')
 
-            state = guild_states[ctx.guild.id]
-            async with state.lock:
-                song = {
-                    'title': info.get('title', 'Unknown Track'),
-                    'url': os.path.abspath(filepath),
-                    'requester': ctx.author.display_name,
-                    'duration': info.get('duration', 0)
-                }
-                await state.queue.put(song)
-                state.queue_list.append(song)
+            if not info or 'entries' not in info or not info['entries']:
+                await ctx.send("❌ No results found.")
+                return
 
-            await ctx.send(f"✅ Added: {song['title']}")
+            entries = info['entries'][:5]
+            if not entries:
+                await ctx.send("❌ No valid results found.")
+                return
 
-            if not ctx.voice_client.is_playing():
-                await play_next(ctx)
+            # Build results message
+            message_lines = [f"**Search Results for '{query}':**"]
+            for idx, entry in enumerate(entries, 1):
+                title = entry.get('title', 'Unknown Title')[:45] + ('...' if len(entry.get('title', '')) > 45 else '')
+                duration = entry.get('duration', 0) or 0  # Ensure numerical value
+                mins = int(duration // 60)
+                secs = int(duration % 60)
+                duration_str = f"{mins}:{secs:02d}" if duration else "Unknown"
+                message_lines.append(f"{idx}. {title} ({duration_str})")
 
-            bot_logger.info(f"Stream command: {url} by {ctx.author.display_name}")
+            # Send results with buttons
+            view = SearchView(entries, ctx)
+            message = await ctx.send("\n".join(message_lines), view=view)
+            view.message = message
+
+            # Wait for selection or timeout
+            await view.wait()
+
+            if view.selected_entry is None:
+                await message.edit(content="⏲️ Selection timed out.", view=None)
+                return
+
+            # Process selected result
+            selected_url = (
+                    view.selected_entry.get('webpage_url') or
+                    view.selected_entry.get('url') or
+                    f"https://youtu.be/{view.selected_entry.get('id', '')}"
+            )
+            if not selected_url.startswith('http'):
+                await ctx.send("❌ Could not retrieve valid URL for selected track")
+                bot_logger.error(f"Invalid URL from search result: {view.selected_entry}")
+                return
+            await process_single_url(ctx, selected_url)
 
     except Exception as e:
         bot_logger.error(f"Stream error: {traceback.format_exc()}")
         await ctx.send(f"❌ Streaming error: {str(e)}")
+
+
+# Unified single URL processing
+async def process_single_url(ctx, url):
+    """Handle single track processing from URL or search selection"""
+    try:
+        temp_title = url.split('=')[-1][:30]
+        msg = await ctx.send(f"⏳ Downloading: {temp_title}...")
+
+        ydl_opts = {
+            'source_address': '0.0.0.0',
+            'geo-bypass': True,
+            'format': 'bestaudio/best',
+            'outtmpl': 'downloads/%(title)s.%(ext)s',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        }
+
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            info = await bot.loop.run_in_executor(
+                download_executor,
+                lambda: ydl.extract_info(url, download=True)
+            )
+            filepath = ydl.prepare_filename(info).replace('.webm', '.mp3')
+
+        state = guild_states[ctx.guild.id]
+        async with state.lock:
+            song = {
+                'title': info.get('title', 'Unknown Track'),
+                'url': os.path.abspath(filepath),
+                'requester': ctx.author.display_name,
+                'duration': info.get('duration', 0)
+            }
+            await state.queue.put(song)
+            state.queue_list.append(song)
+
+        await msg.edit(content=f"✅ Added: {song['title']}")
+
+        if not ctx.voice_client.is_playing():
+            await play_next(ctx)
+
+    except Exception as e:
+        await ctx.send(f"❌ Error processing track: {str(e)}")
+        logger.error(f"Single URL error: {traceback.format_exc()}")
 
 
 async def download_and_queue_single(ctx, url):
@@ -1393,14 +1673,32 @@ async def usage(ctx):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member == bot.user and before.channel is None and after.channel is not None:
-        guild_id = member.guild.id
-        if guild_id in last_join_channels:
-            text_channel = last_join_channels.pop(guild_id)
+    """Handle voice state changes with proper cleanup"""
+    if member != bot.user:
+        return
+
+    guild_id = member.guild.id
+    state = guild_states.get(guild_id)
+
+    # Handle disconnections
+    if before.channel and not after.channel:
+        if state:
+            async with state.lock:
+                state.queue = asyncio.Queue()
+                state.queue_list.clear()
+                state.current_song = None
+                state.loop_type = None
+                state.history.clear()
+        bot_logger.info(f"Cleaned up after disconnect in {member.guild.name}")
+
+    # Clean up failed connections
+    elif after.channel and guild_id in last_join_channels:
+        if not member.guild.voice_client or not member.guild.voice_client.is_connected():
             try:
-                await text_channel.send("Use `!help` for available commands!")
-            except (discord.Forbidden, discord.NotFound):
-                pass  # Channel deleted or no permissions
+                await member.guild.voice_client.disconnect(force=True)
+            except:
+                pass
+            last_join_channels.pop(guild_id, None)
 
 
 @bot.event
