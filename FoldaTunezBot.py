@@ -2,7 +2,7 @@
 Folda Tunez Discord Bot
 by Preston Parsons
 01/07/2025
-Version 3.0 Updated 06/25/2025 - 11/16/2025
+Version 0.3.0 Updated 06/25/2025 - 11/16/2025
  Multi-Guild Parallel Processing & Stability Overhaul:
     Parallel Guild Processing:
          Fixed critical issue where multiple guilds couldn't play simultaneously
@@ -42,14 +42,14 @@ Version 3.0 Updated 06/25/2025 - 11/16/2025
 
 Discord.py Changelog: https://discordpy.readthedocs.io/en/stable/whats_new.html
 
-Version 2.5 Updated 05/03/2025
+Version 0.2.7 Updated 05/03/2025
      Added YouTube search functionality to !stream command:
         - Automatic search suggestions for text queries
         - Interactive 5-result selection with buttons
         - Fallback URL construction from video ID
      Enhanced URL validation for search results
 
-Version 2.4 Updated 03/18/2025
+Version 0.2.6 Updated 03/18/2025
     Added a comprehensive logging system with:
         Separate log files for bot (bot.log) and CLI (cli.log) (not every CLI command is logged yet)
         Log rotation (5MB per file, 3 backups)
@@ -77,11 +77,11 @@ Version 2.4 Updated 03/18/2025
         bot.log: All bot-related activity\
         cli.log: All CLI interactions and admin commands
 
-Versions 2.3.1 Updated 03/02/2025
+Versions 0.2.5 Updated 03/02/2025
     Queue command updated so long queues are split, preventing
     overflow of discord message legnth and string character limit.
 
-Version 2.3 Updated 03/02/2025
+Version 0.2.4 Updated 03/02/2025
     Yes, lots of updates today.  Fixing bugs creates more sometimes...
     Anyway heres a fancy looking update log:
     Core Fixes:
@@ -101,7 +101,7 @@ Version 2.3 Updated 03/02/2025
          Reduced memory usage during bulk downloads
          Unified logging for easier debugging - for me anyway
 
-Version 2.2.1 Updated 03/02/2025
+Version 0.2.3 Updated 03/02/2025
     Fixed minor oversights
     Shuffle method updated (was supposed to be in 2.2.1)
     Shuffle Improvements:
@@ -119,7 +119,7 @@ Version 2.2.1 Updated 03/02/2025
             Better handling of active playback
             Proper synchronization with queue display commands
 
-Version 2.2 Updated 03/02/2025
+Version 0.2.2 Updated 03/02/2025
 
 New Features & Improvements:
 
@@ -142,7 +142,7 @@ New Features & Improvements:
         Incorporated additional locking and error handling mechanisms to handle concurrent operations more gracefully.
         Enhanced logging to provide more detailed insights for debugging and monitoring.
 
-Version 2.1 Updated 02/21/2025
+Version 0.2.1 Updated 02/21/2025
     New Features and Improvements:
 
         CLI Help Documentation:
@@ -192,7 +192,7 @@ Version 2.1 Updated 02/21/2025
         Updated the main script's docstring to reflect the new changes in Version 2.1.
         Improved inline comments for better code understanding.
 
-Version 2.0 updated 02/20/2025
+Version 0.2.0 updated 02/20/2025
     New Admin Features:
         Interactive CLI with server monitoring
         Remote queue management
@@ -207,14 +207,14 @@ Version 2.0 updated 02/20/2025
         First song in playlist plays as soon as it is done downloading,
         while the rest of the playlist continues to download
 
-Version 1.7 updated 02/09/2025
+Version 0.1.8 updated 02/09/2025
 Changes:
     Re-built shuffling algorithm
     Queueing from !play and !stream fixed, allowing
     local play and streamed files to be in the same queue
     looping updated
 
-Version 1.6 updated 01/30/2025
+Version 0.1.7 updated 01/30/2025
 Changes:
     Per-Server queueing improved
     YouTube playback updated to working state
@@ -237,7 +237,7 @@ Changes:
         Added logging to help debug issues.
 
 
-Version 1.5.1 updated 01/08/2025
+Version 0.1.6 updated 01/08/2025
 Changes:
     Support for per-server (guild) queue and playback,
     fixing the issue where playback was shared globally
@@ -259,7 +259,7 @@ Changes:
     Cycle Through States:
         The !loop command cycles through the three states.
 
-Version 1.5 updated 01/07/2025
+Version 0.1.5 updated 01/07/2025
 Features:
     Join a voice channel
     Play audio from a path on your local machine
