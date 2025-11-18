@@ -2,6 +2,20 @@
 Folda Tunez Discord Bot
 by Preston Parsons
 01/07/2025
+Version 0.3.1 Updated 11/17/2025 
+
+Queue System & Playback Stability Fix
+Fixed Issues:
+    - Race conditions in playback loop causing "Already playing audio" errors
+    - Queue system properly integrated with stream command
+    - Loop functionality restored with proper state management
+    - Playback stability with proper voice client state checking
+Key Changes:
+    - Added is_playing flag to prevent race conditions
+    - Unified queue handling between stream and local playback
+    - Enhanced playback loop with proper state synchronization
+    - Fixed loop command state transitions
+    
 Version 0.3.0 Updated 06/25/2025 - 11/16/2025
  Multi-Guild Parallel Processing & Stability Overhaul:
     Parallel Guild Processing:
@@ -273,6 +287,10 @@ Features:
 Subject to the license terms found at: https://sirobivan.org/pcl1-1.html
 Copyright 2025 Parsons Computing
 """
+"""
+
+"""
+
 import traceback
 import discord
 from discord.ext import commands
@@ -371,6 +389,8 @@ class GuildState:
         self.is_playing = False
         self.voice_client = None
         self.last_activity = time.time()
+        self.start_time = None
+        self.playback_active = False  # NEW: Prevent race conditions
 
     async def start_playback_loop(self, ctx):
         """Start dedicated playback loop for this guild"""
@@ -389,13 +409,15 @@ class GuildState:
             except asyncio.CancelledError:
                 pass
         self.is_playing = False
+        self.playback_active = False
         bot_logger.info(f"Stopped playback loop for guild {self.guild_id}")
 
     async def _playback_loop(self, ctx):
         """Dedicated playback loop for this guild"""
         while True:
             try:
-                await self._play_next_safe(ctx)
+                if not self.playback_active and not self.is_playing:
+                    await self._play_next_safe(ctx)
                 await asyncio.sleep(1)  # Prevent tight looping
             except asyncio.CancelledError:
                 break
@@ -404,14 +426,40 @@ class GuildState:
                 await asyncio.sleep(5)  # Wait before retrying
 
     async def _play_next_safe(self, ctx):
-        """Thread-safe next song playback"""
+        """Thread-safe next song playback with proper state management"""
         try:
+            # Prevent multiple simultaneous playback attempts
+            if self.playback_active or (ctx.voice_client and ctx.voice_client.is_playing()):
+                return
+
+            self.playback_active = True
+
             # Ensure we have a valid voice connection
             if not ctx.voice_client or not ctx.voice_client.is_connected():
-                if not await ensure_voice_connection(ctx):
+                # Try to reconnect using the last known channel or author's channel
+                channel = None
+                if ctx.author and hasattr(ctx.author, "voice") and ctx.author.voice:
+                    channel = ctx.author.voice.channel
+                elif self.guild_id in last_join_channels:
+                    channel = last_join_channels[self.guild_id]
+
+                if channel and isinstance(channel, discord.VoiceChannel):
+                    try:
+                        await channel.connect(timeout=30.0, reconnect=True)
+                        bot_logger.info(f"Reconnected to voice channel in guild {self.guild_id}")
+                    except Exception as e:
+                        bot_logger.error(f"Failed to reconnect to voice: {str(e)}")
+                        self.is_playing = False
+                        self.playback_active = False
+                        return
+                else:
+                    bot_logger.warning(f"No voice channel available for reconnection in guild {self.guild_id}")
+                    self.is_playing = False
+                    self.playback_active = False
                     return
 
             # Get next song
+            song = None
             if self.loop_type == 'song' and self.current_song:
                 song = self.current_song
             elif not self.queue.empty():
@@ -421,16 +469,20 @@ class GuildState:
                     if self.queue_list:
                         self.queue_list.pop(0)
             elif self.loop_type == 'queue' and self.history:
+                # Refill queue from history for looping
                 for track in self.history:
                     await self.queue.put(track)
                     async with self.lock:
                         self.queue_list.append(track)
-                song = await self.queue.get()
-                async with self.lock:
-                    if self.queue_list:
-                        self.queue_list.pop(0)
-            else:
+                if not self.queue.empty():
+                    song = await self.queue.get()
+                    async with self.lock:
+                        if self.queue_list:
+                            self.queue_list.pop(0)
+
+            if not song:
                 self.is_playing = False
+                self.playback_active = False
                 return
 
             self.current_song = song
@@ -441,12 +493,17 @@ class GuildState:
             # Verify file exists
             if not os.path.exists(song['url']):
                 await ctx.send(f"File missing: {song['title']}")
+                self.playback_active = False
+                # Try to play next song
+                asyncio.create_task(self._play_next_safe(ctx))
                 return
 
             # Create audio source
             source = TrackedFFmpegPCMAudio(song['url'], guild_id=self.guild_id)
 
             def after_playback(error):
+                self.playback_active = False
+                self.is_playing = False
                 if error:
                     logger.error(f"Playback error in guild {self.guild_id}: {error}")
                 # Schedule next playback in the main event loop
@@ -456,12 +513,20 @@ class GuildState:
             await ctx.send(f"Now playing: {song['title']}")
 
         except discord.ClientException as e:
+            self.playback_active = False
             if "Not connected to voice" in str(e):
-                await ensure_voice_connection(ctx)
+                bot_logger.warning(f"Voice connection lost in guild {self.guild_id}, will retry")
+                await asyncio.sleep(2)
+                asyncio.create_task(self._play_next_safe(ctx))
+            elif "Already playing audio" in str(e):
+                bot_logger.warning(f"Playback race condition in guild {self.guild_id}, retrying")
+                await asyncio.sleep(1)
+                asyncio.create_task(self._play_next_safe(ctx))
             else:
                 bot_logger.error(f"Playback ClientException in guild {self.guild_id}: {traceback.format_exc()}")
                 await ctx.send("❌ Playback error occurred")
         except Exception as e:
+            self.playback_active = False
             bot_logger.error(f"Playback error in guild {self.guild_id}: {traceback.format_exc()}")
             await ctx.send("❌ Playback error occurred")
 
@@ -737,8 +802,6 @@ class AdminCLI(Cmd):
             self.logger.error(f"Join command error: {traceback.format_exc()}")
             self._log_and_print(f"Error processing join command: {str(e)}", 'error')
 
-        self._safe_run_coroutine(join(), timeout=60)
-
     def do_stream(self, arg):
         """Stream audio from URL in specified server: stream <guild_bot_id> <url>"""
         args = arg.split(maxsplit=1)
@@ -794,6 +857,7 @@ class AdminCLI(Cmd):
                             state.loop_type = None
                             state.history.clear()
                             state.is_playing = False  # ADDED
+                            state.playback_active = False  # NEW
                             self.logger.info(f"Cleared queue for guild {guild_id}")
                     else:
                         self._log_and_print("Not in a voice channel", 'warning')
@@ -981,7 +1045,6 @@ class AdminCLI(Cmd):
         """Exit the CLI"""
         self.logger.info("CLI session ended")
         return True
-        return True
 
 
 # search results
@@ -1050,7 +1113,7 @@ async def on_ready():
 
 
 async def ensure_voice_connection(ctx):
-    """Enhanced voice connection handling"""
+    """Enhanced voice connection handling - only used for initial joins"""
     bot_logger.info(f"Voice connection requested by {ctx.author} in {ctx.guild.name}")
     guild_id = ctx.guild.id
 
@@ -1074,39 +1137,38 @@ async def ensure_voice_connection(ctx):
         except Exception as e:
             bot_logger.warning(f"Cleanup error: {str(e)}")
 
-    backoff = ExponentialBackoff()
-    for attempt in range(3):
-        try:
-            voice_client = await channel.connect(
-                timeout=60.0,
-                reconnect=True,
-                self_deaf=True
-            )
+    try:
+        voice_client = await channel.connect(
+            timeout=60.0,
+            reconnect=True,
+            self_deaf=True
+        )
 
-            if hasattr(voice_client, 'ws'):
-                voice_client.ws.connection_timeout = 60
-                voice_client.ws.latency = float('inf')
+        # Store for potential reconnection
+        last_join_channels[guild_id] = channel
 
-            last_join_channels[guild_id] = ctx.channel
-            bot_logger.info(f"Connected to voice in {ctx.guild.name}")
-            return True
+        bot_logger.info(f"Connected to voice in {ctx.guild.name}")
+        return True
 
-        except Exception as e:
-            bot_logger.error(f"Voice connection attempt {attempt+1} failed: {str(e)}")
-            await asyncio.sleep(backoff.delay())
-
-    await ctx.send("❌ Failed to connect to voice channel after several attempts")
-    return False
+    except Exception as e:
+        bot_logger.error(f"Voice connection failed: {str(e)}")
+        await ctx.send("❌ Failed to connect to voice channel")
+        return False
 
 
 async def play_next(ctx):
-    """Start playback for a guild - now uses dedicated guild playback loop"""
+    """Start playback for a guild - uses dedicated guild playback loop"""
     guild_id = ctx.guild.id
     state = get_guild_state(guild_id)
 
+    # Store the last join channel for reconnection
+    if ctx.author and hasattr(ctx.author, "voice") and ctx.author.voice:
+        last_join_channels[guild_id] = ctx.author.voice.channel
+    elif hasattr(ctx, "channel") and isinstance(ctx.channel, discord.VoiceChannel):
+        last_join_channels[guild_id] = ctx.channel
+
     await state.start_playback_loop(ctx)
     return False
-
 
 
 def is_us_voice_server(endpoint: str) -> bool:
@@ -1174,6 +1236,7 @@ async def leave(ctx):
             state.loop_type = None
             state.history.clear()
             state.is_playing = False
+            state.playback_active = False  # NEW
             bot_logger.debug(f"Cleared queue in {ctx.guild.name}")
 
         await ctx.send("✅ Left voice channel and cleared queue")
@@ -1191,9 +1254,9 @@ async def help(ctx):
         "**Folda Tunez Bot Commands**\n",
         "🎵 **Music Commands**:",
         f"`{BOT_PREFIX}join` - Join your voice channel",
-        f"`{BOT_PREFIX}leave` - Leave your voice channel"
+        f"`{BOT_PREFIX}leave` - Leave your voice channel",
         f"`{BOT_PREFIX}stream <url>` - Stream from YouTube/SoundCloud/etc",
-        f"`{BOT_PREFIX}stream <text/video name> - Search YouTube and present 5 options",
+        f"`{BOT_PREFIX}stream <text/video name>` - Search YouTube and present 5 options",
         f"`{BOT_PREFIX}queue` - Show current queue with timestamps",
         f"`{BOT_PREFIX}skip` - Skip current track",
         f"`{BOT_PREFIX}pause` - Pause playback",
@@ -1204,11 +1267,11 @@ async def help(ctx):
         f"`{BOT_PREFIX}playlist_local <file>` - Load local playlist",
         "\n📊 **Info Commands**:",
         f"`{BOT_PREFIX}usage` - Show data usage and uptime",
-        f"`{BOT_PREFIX}help_me` - Show this help message",
+        f"`{BOT_PREFIX}help` - Show this help message",
         "\n⚙️ **Examples**:",
         f"`{BOT_PREFIX}stream https://youtu.be/dQw4w9WgXcQ`",
         f"`{BOT_PREFIX}playlist_local my_playlist.txt`",
-        f"Folda Tunez v2.3.1"
+        "Folda Tunez v3.1",
         "\nNeed admin help? Contact your server moderators!"
     ]
 
@@ -1219,9 +1282,6 @@ async def help(ctx):
         logger.error(f"Help command error: {str(e)}")
 
 
-# NEW QUEUE COMMAND
-# Updated queue command
-# Updated again in 3.1
 @bot.command()
 async def queue(ctx):
     """Show current queue with playback information"""
@@ -1272,14 +1332,9 @@ async def queue(ctx):
 
 @bot.command()
 async def stream(ctx, *, query: str):
-    """Stream audio from URL or search YouTube"""
+    """Stream audio from URL or search YouTube - FIXED to use queue system"""
     try:
-        if not ctx.voice_client:
-            await ctx.send("❗ Join a voice channel first!")
-            return
-
-        if not await ensure_voice_connection(ctx):
-            return
+        state = get_guild_state(ctx.guild.id)
 
         # URL handling
         if query.startswith(('http://', 'https://')):
@@ -1535,6 +1590,7 @@ async def process_playlist(ctx, url):
 
 @bot.command()
 async def skip(ctx):
+    """Skip the current track"""
     guild_id = ctx.guild.id
     state = get_guild_state(guild_id)
 
@@ -1551,54 +1607,60 @@ async def skip(ctx):
 
 @bot.command()
 async def loop(ctx):
+    """Toggle loop mode - FIXED"""
     guild_id = ctx.guild.id
     state = get_guild_state(guild_id)
 
     if state.loop_type is None:
         state.loop_type = 'queue'
-        await ctx.send("Looping entire queue")
+        await ctx.send("🔁 Looping entire queue")
     elif state.loop_type == 'queue':
         state.loop_type = 'song'
-        await ctx.send("Looping current song")
+        await ctx.send("🔂 Looping current song")
     else:
         state.loop_type = None
-        await ctx.send("Looping disabled")
+        await ctx.send("➡️ Looping disabled")
 
 
 @bot.command()
 async def stop(ctx):
+    """Stop playback and clear queue"""
     guild_id = ctx.guild.id
-    state = get_guild_state(guild_id)  # CHANGED from guild_states[guild_id]
+    state = get_guild_state(guild_id)
 
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
 
+    # Clear queue
     while not state.queue.empty():
         await state.queue.get()
 
-    state.loop_type = None
-    state.current_song = None
-    state.is_playing = False  # ADDED: Stop the playback state
-    await ctx.send("Playback stopped and queue cleared")
+    async with state.lock:
+        state.queue_list.clear()
+        state.loop_type = None
+        state.current_song = None
+        state.is_playing = False
+        state.playback_active = False
 
-
-
+    await ctx.send("⏹️ Playback stopped and queue cleared")
 
 
 @bot.command()
 async def pause(ctx):
+    """Pause playback"""
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.pause()
-        await ctx.send("Playback paused")
+        await ctx.send("⏸️ Playback paused")
     else:
         await ctx.send("Nothing playing to pause")
 
 
 @bot.command()
 async def resume(ctx):
+    """Resume playback"""
     if ctx.voice_client and ctx.voice_client.is_paused():
         ctx.voice_client.resume()
-        await ctx.send("Playback resumed")
+        await ctx.send("▶️ Playback resumed")
     else:
         await ctx.send("Nothing paused to resume")
 
@@ -1607,7 +1669,7 @@ async def resume(ctx):
 async def shuffle(ctx):
     """Shuffle the current queue with enhanced reliability"""
     guild_id = ctx.guild.id
-    state = get_guild_state(guild_id)  # CHANGED from guild_states[guild_id]
+    state = get_guild_state(guild_id)
 
     try:
         async with state.lock:
@@ -1667,8 +1729,9 @@ async def shuffle(ctx):
 
 @bot.command()
 async def playlist_local(ctx, filename: str):
+    """Load local playlist"""
     guild_id = ctx.guild.id
-    state = get_guild_state(guild_id)  # CHANGED from guild_states[guild_id]
+    state = get_guild_state(guild_id)
 
     try:
         filepath = os.path.join(os.getcwd(), filename)
@@ -1702,7 +1765,7 @@ async def playlist_local(ctx, filename: str):
 
             if valid_songs > 0:
                 await ctx.send(f"Added {valid_songs} songs to queue")
-                if not state.is_playing:  # CHANGED: Check state instead of voice_client
+                if not state.is_playing:
                     await play_next(ctx)
             else:
                 await ctx.send("No valid songs found in playlist")
@@ -1714,6 +1777,7 @@ async def playlist_local(ctx, filename: str):
 
 @bot.command()
 async def usage(ctx):
+    """Show data usage and uptime"""
     guild_id = ctx.guild.id
     total_mb = DATA_USAGE[guild_id]['total_bytes'] / 1024 / 1024
     uptime = time.time() - DATA_USAGE[guild_id]['start_time']
@@ -1721,11 +1785,6 @@ async def usage(ctx):
         f"**Data Usage:** {total_mb:.2f} MB\n"
         f"**Uptime:** {uptime // 3600:.0f}h {(uptime % 3600) // 60:.0f}m"
     )
-
-
-bot.event
-
-bot.event
 
 
 # Event handlers
@@ -1740,7 +1799,7 @@ async def on_voice_state_update(member, before, after):
 
     if before.channel and not after.channel:
         if state:
-            await state.stop_playback_loop()  # UPDATED: Use the new method
+            await state.stop_playback_loop()
             async with state.lock:
                 state.queue = asyncio.Queue()
                 state.queue_list.clear()
@@ -1748,6 +1807,7 @@ async def on_voice_state_update(member, before, after):
                 state.loop_type = None
                 state.history.clear()
                 state.is_playing = False
+                state.playback_active = False
 
         if member.guild.voice_client:
             try:
@@ -1791,9 +1851,4 @@ async def on_guild_join(guild):
 
 
 if __name__ == "__main__":
-    bot.run('YOUR_KEY_HERE')
-
-# It is highly recommended to put the toek for your discord bot in a seperate file somewhere that the script can access
-# There are methods to implement system environment variable access as well that can store the token
-# I chose to just run my bot with a plaintext token for simplicity of debugging
-# I am researching methods of using system environment variables to store the token
+    bot.run('YOUR_TOKEN_HERE')
