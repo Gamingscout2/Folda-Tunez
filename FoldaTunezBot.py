@@ -2,293 +2,19 @@
 Folda Tunez Discord Bot
 by Preston Parsons
 01/07/2025
-Version 0.3.1 Updated 11/17/2025 
+Version 0.3.1 Updated 11/17/2025 - Queue System & Playback Stability Fix
 
-Queue System & Playback Stability Fix
 Fixed Issues:
     - Race conditions in playback loop causing "Already playing audio" errors
     - Queue system properly integrated with stream command
     - Loop functionality restored with proper state management
     - Playback stability with proper voice client state checking
+
 Key Changes:
     - Added is_playing flag to prevent race conditions
     - Unified queue handling between stream and local playback
     - Enhanced playback loop with proper state synchronization
     - Fixed loop command state transitions
-    
-Version 0.3.0 Updated 06/25/2025 - 11/16/2025
- Multi-Guild Parallel Processing & Stability Overhaul:
-    Parallel Guild Processing:
-         Fixed critical issue where multiple guilds couldn't play simultaneously
-         Each guild now runs in its own dedicated playback loop with isolated state management
-         True parallel audio streaming across all connected servers
-         Enhanced thread-safe guild state operations with dedicated locks
-
-    Voice Connection Stability:
-         Resolved persistent "4006" WebSocket errors via discord.py 2.6.2+ gateway updates
-         Optimized session timeouts and UDP packet handling for reliable voice connections
-         Improved retransmission logic for audio data packets, reducing robotic audio glitches by 6.5%
-         Enhanced voice connection lifecycle management with proper cleanup
-
-    Guild State Management:
-         Dedicated GuildState class with isolated playback loops per guild
-         Thread-safe queue operations with atomic state transitions
-         Proper cleanup and resource management on guild disconnects
-         Enhanced state consistency between queue, playback, and CLI operations
-
-    Performance Optimizations:
-         Increased MAX_THREADS to 8 for better parallel download processing
-         Dedicated playback tasks prevent guild interference
-         Improved memory usage with proper state cleanup
-         Optimized voice client connection pooling
-
-    CLI & Admin Enhancements:
-         Updated CLI commands to use new parallel guild state system
-         Enhanced server monitoring with playback status indicators
-         Proper shutdown sequence with guild state cleanup
-         Improved error handling across all admin operations
-
-    Core System Improvements:
-         Fixed guild state inconsistencies in stop, shuffle, and playlist_local commands
-         Enhanced voice state event handling with proper playback loop management
-         Improved error recovery and reconnection logic
-         Better resource cleanup on bot shutdown
-
-Discord.py Changelog: https://discordpy.readthedocs.io/en/stable/whats_new.html
-
-Version 0.2.7 Updated 05/03/2025
-     Added YouTube search functionality to !stream command:
-        - Automatic search suggestions for text queries
-        - Interactive 5-result selection with buttons
-        - Fallback URL construction from video ID
-     Enhanced URL validation for search results
-
-Version 0.2.6 Updated 03/18/2025
-    Added a comprehensive logging system with:
-        Separate log files for bot (bot.log) and CLI (cli.log) (not every CLI command is logged yet)
-        Log rotation (5MB per file, 3 backups)
-        Both console and file logging
-        Standardized log format with timestamps
-    Added the !leave command back in:
-        Disconnects from voice
-        Clears the queue
-        Resets playback state
-        Provides user feedback
-    Added extensive logging throughout:
-        Command invocations
-        Critical operations
-        Errors and exceptions
-        System events
-    Modified CLI to log all operations
-        The logging system will track:
-             All user commands with user/server info
-        System operations (voice connections, queue changes)
-        Errors with full tracebacks
-        CLI command execution
-        Resource usage (voice client connections, memory)
-        Playback status changes
-    Logs can be found in:
-        bot.log: All bot-related activity\
-        cli.log: All CLI interactions and admin commands
-
-Versions 0.2.5 Updated 03/02/2025
-    Queue command updated so long queues are split, preventing
-    overflow of discord message legnth and string character limit.
-
-Version 0.2.4 Updated 03/02/2025
-    Yes, lots of updates today.  Fixing bugs creates more sometimes...
-    Anyway heres a fancy looking update log:
-    Core Fixes:
-         Fixed YouTube playlist processing errors ("playlist does not exist")
-         Resolved prepare_filename crashes with updated yt-dlp integration
-         ️ Improved CLI-to-Discord message synchronization
-    Key Improvements:
-         Optimized parallel download stability for large playlists
-         Enhanced shuffle reliability (Fisher-Yates implementation)
-         Added metadata tracking for local playlist entries
-    User Experience:
-         Clearer download progress feedback in CLI
-         Better error messages for invalid URLs/files
-         Streamlined queue display formatting
-    Under the Hood:
-         Strengthened thread-safety for queue operations
-         Reduced memory usage during bulk downloads
-         Unified logging for easier debugging - for me anyway
-
-Version 0.2.3 Updated 03/02/2025
-    Fixed minor oversights
-    Shuffle method updated (was supposed to be in 2.2.1)
-    Shuffle Improvements:
-            Current Song Preservation: Maintains currently playing song at queue start
-            Thread Safety: Uses queue lock for atomic operations
-            Download Awareness: Blocks shuffle during active downloads
-            Better Algorithms: Uses Fisher-Yates shuffle for true randomness
-            State Consistency: Maintains sync between Queue and queue_list
-            User Feedback: Detailed status messages with emoji indicators
-            Error Handling: Graceful failure with error logging
-
-    Usage remains the same: !shuffle but now with:
-            Protection against partial shuffles
-            Clear feedback about what was shuffled
-            Better handling of active playback
-            Proper synchronization with queue display commands
-
-Version 0.2.2 Updated 03/02/2025
-
-New Features & Improvements:
-
-    Enhanced Queue Management:
-        Introduced a new queue command that displays the currently playing song with its elapsed time and lists upcoming tracks.
-        Updated the underlying GuildState to maintain an ordered queue_list and track the song’s start time for accurate playback progress.
-
-    Improved Metadata Handling:
-        Both the stream and playlist_local commands now store additional metadata—such as the requester’s display name and track duration—to improve transparency and user experience.
-
-    CLI Enhancements:
-        Added a new CLI queue command within the AdminCLI, allowing administrators to send the current queue status directly to a specified text channel.
-        Improved error handling and ID resolution for better stability and ease-of-use in the CLI environment.
-
-    Queue Operations Refinement:
-        Modified the shuffle command to update the queue order accurately while maintaining consistency in the playback order.
-        Optimized thread-safe operations within queue management to prevent race conditions and ensure smooth playback transitions.
-
-    General Code Quality & Stability:
-        Incorporated additional locking and error handling mechanisms to handle concurrent operations more gracefully.
-        Enhanced logging to provide more detailed insights for debugging and monitoring.
-
-Version 0.2.1 Updated 02/21/2025
-    New Features and Improvements:
-
-        CLI Help Documentation:
-
-            Added comprehensive help documentation for previously undocumented CLI commands:
-
-                stream: Stream audio from a URL in a specified server.
-                servers: List all connected servers with status and queue information.
-                channels: List channels in a specific server.
-                join: Join a voice channel in a specified server.
-                sendmsg: Send a message to a text channel.
-
-            Improved usability and discoverability of CLI commands with detailed descriptions.
-
-        CLI Command Enhancements:
-
-            Improved error handling and user feedback for CLI commands.
-            Added proper ID resolution for guild and channel identifiers in CLI commands.
-            Enhanced the stream command to handle URL validation and provide better feedback during the download process.
-
-        Code Quality Improvements:
-
-            Refactored CLI command methods to ensure consistency and readability.
-            Added docstrings to all CLI command methods for better maintainability.
-            Improved logging for CLI operations to aid in debugging and monitoring.
-
-        User Experience:
-
-            Added a newline before the CLI prompt for better readability.
-            Enhanced the servers command output with additional details, including current song, data usage, and queue size.
-            Improved the channels command output with channel type, NSFW status, and category information.
-
-    Bug Fixes:
-
-        Fixed an issue where the stream command would not properly validate URLs before processing.
-        Resolved a bug in the join command where it would fail to join a voice channel if the bot was already connected to another channel in the same guild.
-        Addressed a minor issue in the sendmsg command where it would not properly handle messages with spaces.
-
-    Performance Improvements:
-
-        Optimized the stream command to handle parallel downloads more efficiently.
-        Improved the responsiveness of CLI commands by ensuring proper thread-safe operations.
-
-    Documentation Updates:
-
-        Added detailed help documentation for all CLI commands.
-        Updated the main script's docstring to reflect the new changes in Version 2.1.
-        Improved inline comments for better code understanding.
-
-Version 0.2.0 updated 02/20/2025
-    New Admin Features:
-        Interactive CLI with server monitoring
-        Remote queue management
-        Data usage tracking (!usage command)
-        Emergency shutdown capability
-
-    Performance Improvements:
-        Parallel download processing
-        Thread-safe queue operations
-        Auto-reconnection logic
-        Optimized audio streaming
-        First song in playlist plays as soon as it is done downloading,
-        while the rest of the playlist continues to download
-
-Version 0.1.8 updated 02/09/2025
-Changes:
-    Re-built shuffling algorithm
-    Queueing from !play and !stream fixed, allowing
-    local play and streamed files to be in the same queue
-    looping updated
-
-Version 0.1.7 updated 01/30/2025
-Changes:
-    Per-Server queueing improved
-    YouTube playback updated to working state
-
-    Audio Extraction Updates:
-
-        Added extract_audio and postprocessors to ydl_opts to ensure audio is extracted directly.
-        Prefers mp3 format with a quality of 192kbps.
-
-    Error Handling:
-
-        Improved error handling for YouTube URL processing.
-
-    Playlist Support:
-
-        Handles playlists more efficiently by extracting all entries.
-
-    Logging:
-
-        Added logging to help debug issues.
-
-
-Version 0.1.6 updated 01/08/2025
-Changes:
-    Support for per-server (guild) queue and playback,
-    fixing the issue where playback was shared globally
-    across multiple servers
-
-    Stop function fixed
-
-    Skip function fixed, if a loop is enabled it will retain the queue
-
-    Looping updated to allow looping of the current track
-    Three Loop States:
-        None: No looping.
-        'queue': Loop the entire queue.
-        'song': Loop the currently playing song.
-    Queue Refill for Looping:
-        If the queue is empty and the loop type is 'queue', the bot refills the queue with previously played songs.
-    Replay Current Song for 'song' Looping:
-        The current_song is stored in guild_states to replay the current track if looping the song.
-    Cycle Through States:
-        The !loop command cycles through the three states.
-
-Version 0.1.5 updated 01/07/2025
-Features:
-    Join a voice channel
-    Play audio from a path on your local machine
-    Stream audio from link (only DRM free links will work, no spotify as of 1.5)
-    Full queue support and YouTube playlist support, including:
-        Skip current track
-        Pause/Resume Playback
-        Loop entire queue
-        Loop current song coming in next update
-
-Subject to the license terms found at: https://sirobivan.org/pcl1-1.html
-Copyright 2025 Parsons Computing
-"""
-"""
-
 """
 
 import traceback
@@ -490,16 +216,60 @@ class GuildState:
             self.is_playing = True
             self.last_activity = time.time()
 
-            # Verify file exists
-            if not os.path.exists(song['url']):
-                await ctx.send(f"File missing: {song['title']}")
+            # Verify file exists with better logging
+            original_url = song['url']
+            if not os.path.exists(original_url):
+                bot_logger.error(f"File not found: {original_url}")
+                await ctx.send(f"❌ File missing: {song['title']}")
+
+                # Try to find alternative file path
+                base_name = os.path.splitext(original_url)[0]
+                for ext in ['.mp3', '.m4a', '.webm', '.mp4', '.wav', '.flac', '.ogg', '.aac']:
+                    test_path = base_name + ext
+                    if os.path.exists(test_path):
+                        bot_logger.info(f"Found alternative file: {test_path}")
+                        song['url'] = test_path
+                        break
+
+                # If still not found, skip to next song
+                if not os.path.exists(song['url']):
+                    bot_logger.error(f"File not found even after extension check: {song['title']}")
+                    self.playback_active = False
+                    # Try to play next song
+                    asyncio.create_task(self._play_next_safe(ctx))
+                    return
+
+            # Verify the file is readable and has content
+            try:
+                file_size = os.path.getsize(song['url'])
+                if file_size == 0:
+                    bot_logger.error(f"Empty file: {song['url']}")
+                    await ctx.send(f"❌ File is empty: {song['title']}")
+                    self.playback_active = False
+                    asyncio.create_task(self._play_next_safe(ctx))
+                    return
+                bot_logger.info(f"Playing file: {song['url']} (Size: {file_size} bytes)")
+            except Exception as e:
+                bot_logger.error(f"File access error: {song['url']} - {str(e)}")
+                await ctx.send(f"❌ Cannot read file: {song['title']}")
                 self.playback_active = False
-                # Try to play next song
                 asyncio.create_task(self._play_next_safe(ctx))
                 return
 
-            # Create audio source
-            source = TrackedFFmpegPCMAudio(song['url'], guild_id=self.guild_id)
+            # Create audio source with error handling
+            try:
+                source = TrackedFFmpegPCMAudio(song['url'], guild_id=self.guild_id)
+
+                # Test if source is valid by reading a small amount
+                if not hasattr(source, 'read'):
+                    raise Exception("Invalid audio source created")
+
+            except Exception as e:
+                bot_logger.error(f"Failed to create audio source: {song['url']} - {str(e)}")
+                await ctx.send(f"❌ Audio format error: {song['title']}")
+                self.playback_active = False
+                asyncio.create_task(self._play_next_safe(ctx))
+                return
 
             def after_playback(error):
                 self.playback_active = False
@@ -509,18 +279,24 @@ class GuildState:
                 # Schedule next playback in the main event loop
                 asyncio.run_coroutine_threadsafe(self._play_next_safe(ctx), bot.loop)
 
-            ctx.voice_client.play(source, after=after_playback)
-            await ctx.send(f"Now playing: {song['title']}")
+            try:
+                ctx.voice_client.play(source, after=after_playback)
+                await ctx.send(f"Now playing: {song['title']}")
+            except discord.ClientException as e:
+                if "Already playing audio" in str(e):
+                    bot_logger.warning(f"Playback race condition in guild {self.guild_id}, retrying")
+                    self.playback_active = False
+                    await asyncio.sleep(1)
+                    asyncio.create_task(self._play_next_safe(ctx))
+                    return
+                else:
+                    raise
 
         except discord.ClientException as e:
             self.playback_active = False
             if "Not connected to voice" in str(e):
                 bot_logger.warning(f"Voice connection lost in guild {self.guild_id}, will retry")
                 await asyncio.sleep(2)
-                asyncio.create_task(self._play_next_safe(ctx))
-            elif "Already playing audio" in str(e):
-                bot_logger.warning(f"Playback race condition in guild {self.guild_id}, retrying")
-                await asyncio.sleep(1)
                 asyncio.create_task(self._play_next_safe(ctx))
             else:
                 bot_logger.error(f"Playback ClientException in guild {self.guild_id}: {traceback.format_exc()}")
@@ -792,7 +568,18 @@ class AdminCLI(Cmd):
                         await channel.connect()
                         self.logger.info(f"Connected to voice channel {channel.id} in guild {guild_id}")
 
+                    # Update guild state with the new voice client
+                    state = get_guild_state(guild_id)
+                    state.voice_client = guild.voice_client
+                    last_join_channels[guild_id] = channel
+
                     self._log_and_print(f"Joined {channel.name}")
+
+                    # Start playback loop if not already running
+                    if not state.playback_task or state.playback_task.done():
+                        ctx = MockContext(guild)
+                        await state.start_playback_loop(ctx)
+
                 except Exception as e:
                     self.logger.error(f"Join error: {traceback.format_exc()}")
                     self._log_and_print(f"Join failed: {str(e)}", 'error')
@@ -818,10 +605,95 @@ class AdminCLI(Cmd):
                 print("Guild not found")
                 return
 
-            ctx = MockContext(guild)
-            await self.bot.get_command('stream').callback(ctx, url=url)
+            # Create a better mock context with proper voice handling
+            # Try to find a text channel to send messages to
+            text_channel = None
+            for channel in guild.text_channels:
+                if channel.permissions_for(guild.me).send_messages:
+                    text_channel = channel
+                    break
+
+            if not text_channel:
+                print("No text channel with send permissions found")
+                return
+
+            # Create enhanced mock context
+            class EnhancedMockContext:
+                def __init__(self, guild, channel):
+                    self.guild = guild
+                    self.voice_client = guild.voice_client
+                    self.author = type('MockAuthor', (), {
+                        'display_name': 'CLI Admin',
+                        'voice': None,
+                        'bot': False
+                    })()
+                    self.author.voice = type('MockVoice', (), {
+                        'channel': guild.voice_client.channel if guild.voice_client else None
+                    })()
+                    self.bot = guild.me
+                    self.channel = channel
+                    self.message = type('MockMessage', (), {
+                        'guild': guild,
+                        'author': self.author,
+                        'channel': channel,
+                        'content': f'!stream {url}'
+                    })()
+                    # Add these attributes for compatibility
+                    self.send = self._send_message
+
+                async def _send_message(self, content):
+                    """Send message to the channel"""
+                    if self.channel:
+                        try:
+                            await self.channel.send(content)
+                            print(f"[Bot → #{self.channel.name}] {content}")
+                        except Exception as e:
+                            print(f"[Bot Error] Failed to send message: {str(e)}")
+                    else:
+                        print(f"[Bot] {content}")
+
+            ctx = EnhancedMockContext(guild, text_channel)
+
+            # Check if bot is in a voice channel
+            if not ctx.voice_client or not ctx.voice_client.is_connected():
+                print("Bot is not in a voice channel. Use 'join' command first.")
+                # Try to join default voice channel if available
+                voice_channels = [ch for ch in guild.voice_channels]
+                if voice_channels:
+                    print(f"Attempting to join voice channel: {voice_channels[0].name}")
+                    try:
+                        await voice_channels[0].connect()
+                        print(f"Joined {voice_channels[0].name}")
+                    except Exception as e:
+                        print(f"Failed to join voice channel: {str(e)}")
+                        return
+                else:
+                    print("No voice channels available in this guild")
+                    return
+
+            # Call the stream command with the correct parameter name
+            await self.bot.get_command('stream').callback(ctx, query=url)  # CHANGED: query=url instead of url=url
+            print(f"Stream command executed for URL: {url}")
 
         self._safe_run_coroutine(stream_audio())
+
+    def do_clear(self, arg):
+        """Clear queue: clear <guild_bot_id>"""
+        if not arg:
+            print("Usage: clear <guild_bot_id>")
+            return
+
+        guild_id = self.resolve_guild(arg)
+        if not guild_id:
+            print("Invalid guild identifier")
+            return
+
+        async def clear():
+            guild = self.bot.get_guild(guild_id)
+            ctx = MockContext(guild)
+            await self.bot.get_command('clear').callback(ctx)
+
+        self._safe_run_coroutine(clear())
 
     def do_leave(self, arg):
         """Leave voice channel: leave <guild_bot_id>"""
@@ -1258,6 +1130,7 @@ async def help(ctx):
         f"`{BOT_PREFIX}stream <url>` - Stream from YouTube/SoundCloud/etc",
         f"`{BOT_PREFIX}stream <text/video name>` - Search YouTube and present 5 options",
         f"`{BOT_PREFIX}queue` - Show current queue with timestamps",
+        f"`{BOT_PREFIX}clear - Clears the server queue"
         f"`{BOT_PREFIX}skip` - Skip current track",
         f"`{BOT_PREFIX}pause` - Pause playback",
         f"`{BOT_PREFIX}resume` - Resume playback",
@@ -1328,6 +1201,29 @@ async def queue(ctx):
 
     for msg in messages:
         await ctx.send(msg)
+
+
+@bot.command()
+async def clear(ctx):
+    """Clear the current queue without stopping playback"""
+    guild_id = ctx.guild.id
+    state = get_guild_state(guild_id)
+
+    # Get queue size before clearing for the response message
+    queue_size = state.queue.qsize()
+
+    # Clear the queue
+    while not state.queue.empty():
+        try:
+            await state.queue.get()
+        except:
+            pass
+
+    # Clear the queue list
+    async with state.lock:
+        state.queue_list.clear()
+
+    await ctx.send(f"✅ Cleared {queue_size} songs from the queue")
 
 
 @bot.command()
@@ -1430,7 +1326,24 @@ async def process_single_url(ctx, url):
                 download_executor,
                 lambda: ydl.extract_info(url, download=True)
             )
-            filepath = ydl.prepare_filename(info).replace('.webm', '.mp3')
+
+            # Get the actual filename that was downloaded
+            # First, get the original filename
+            original_file = ydl.prepare_filename(info)
+
+            # Find the actual MP3 file that was created
+            # The postprocessor creates a .mp3 file from whatever format was downloaded
+            base_name = os.path.splitext(original_file)[0]
+            filepath = base_name + '.mp3'
+
+            # If mp3 file doesn't exist, try other possible extensions
+            if not os.path.exists(filepath):
+                possible_extensions = ['.mp3', '.m4a', '.webm', '.mp4']
+                for ext in possible_extensions:
+                    test_path = base_name + ext
+                    if os.path.exists(test_path):
+                        filepath = test_path
+                        break
 
         state = get_guild_state(ctx.guild.id)
         async with state.lock:
@@ -1444,6 +1357,12 @@ async def process_single_url(ctx, url):
             state.queue_list.append(song)
 
         await msg.edit(content=f"✅ Added: {song['title']}")
+
+        # Verify file exists before playback
+        if not os.path.exists(song['url']):
+            await ctx.send(f"❌ Error: Downloaded file not found: {song['url']}")
+            logger.error(f"File not found: {song['url']}")
+            return
 
         # Start playback if not already playing
         if not state.is_playing:
