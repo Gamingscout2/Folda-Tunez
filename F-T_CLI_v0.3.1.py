@@ -80,8 +80,8 @@ def setup_logger(name, log_file, level=logging.INFO):
 
 
 # Set up loggers
-bot_logger = setup_logger('bot', 'bot.log')
-cli_logger = setup_logger('cli', 'cli.log')
+bot_logger = setup_logger('bot', 'logs/bot.log')
+cli_logger = setup_logger('cli', 'logs/cli.log')
 
 
 # Configuration
