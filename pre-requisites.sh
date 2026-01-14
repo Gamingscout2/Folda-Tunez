@@ -14,6 +14,16 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Get original user (if sudo was used)
+if [ -n "$SUDO_USER" ]; then
+    ORIGINAL_USER="$SUDO_USER"
+    ORIGINAL_HOME=$(eval echo "~$SUDO_USER")
+else
+    ORIGINAL_USER=$(whoami)
+    ORIGINAL_HOME="$HOME"
+fi
+CURRENT_USER=$(whoami)
+
 # Logging function
 log() {
     echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $1"
@@ -31,83 +41,67 @@ warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
-# Function to create directories with sudo if needed
+# Function to check if we can write to a directory
+can_write() {
+    [ -w "$1" ] 2>/dev/null || return 1
+    return 0
+}
+
+# Function to create directories with proper ownership
 create_directories_safe() {
     log "Creating necessary directories..."
-    
+    echo "Current user: $CURRENT_USER"
+    echo "Original user: $ORIGINAL_USER"
+    echo
+
     local dirs=("downloads" "logs" "config")
-    
+    local dir_owner=""
+
+    # Determine who should own the directories
+    if [ "$CURRENT_USER" = "root" ] && [ -n "$ORIGINAL_USER" ]; then
+        echo -e "${YELLOW}Running as root. Directories will be owned by: $ORIGINAL_USER${NC}"
+        dir_owner="$ORIGINAL_USER"
+    else
+        dir_owner="$CURRENT_USER"
+    fi
+
     for dir in "${dirs[@]}"; do
         if [ ! -d "$dir" ]; then
             echo -e "${YELLOW}Directory '$dir' doesn't exist.${NC}"
             read -p "Create it? (y/N): " -n 1 -r
             echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
-                # Check if we have write permissions in current directory
-                if [ -w "." ]; then
-                    mkdir -p "$dir"
-                    if [ $? -eq 0 ]; then
-                        log "Created directory: $dir"
-                    else
-                        error "Failed to create '$dir' with normal permissions"
-                        read -p "Try with sudo? (y/N): " -n 1 -r
-                        echo
-                        if [[ $REPLY =~ ^[Yy]$ ]]; then
-                            sudo mkdir -p "$dir"
-                            if [ $? -eq 0 ]; then
-                                # Fix ownership if created with sudo
-                                sudo chown "$(whoami):$(id -gn)" "$dir"
-                                success "Created '$dir' with sudo"
-                            else
-                                error "Failed to create '$dir' even with sudo"
-                            fi
-                        fi
-                    fi
+                # Create directory
+                mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir"
+
+                # Set ownership
+                if [ "$CURRENT_USER" = "root" ] && [ -n "$dir_owner" ]; then
+                    sudo chown "$dir_owner:$dir_owner" "$dir" 2>/dev/null || true
+                    success "Created '$dir' owned by $dir_owner"
                 else
-                    echo -e "${YELLOW}No write permission in current directory.${NC}"
-                    read -p "Create with sudo? (y/N): " -n 1 -r
-                    echo
-                    if [[ $REPLY =~ ^[Yy]$ ]]; then
-                        sudo mkdir -p "$dir"
-                        if [ $? -eq 0 ]; then
-                            # Fix ownership if created with sudo
-                            sudo chown "$(whoami):$(id -gn)" "$dir"
-                            success "Created '$dir' with sudo"
-                        else
-                            error "Failed to create '$dir' with sudo"
-                        fi
-                    fi
+                    success "Created '$dir'"
                 fi
             else
                 warning "Skipping directory '$dir' creation"
             fi
         else
             log "Directory already exists: $dir"
-            
-            # Check if we have write permissions to existing directory
-            if [ ! -w "$dir" ]; then
-                warning "No write permission in '$dir'"
-                read -p "Fix permissions with sudo? (y/N): " -n 1 -r
-                echo
-                if [[ $REPLY =~ ^[Yy]$ ]]; then
-                    sudo chown "$(whoami):$(id -gn)" "$dir"
-                    if [ $? -eq 0 ]; then
-                        success "Fixed permissions for '$dir'"
-                    else
-                        error "Failed to fix permissions for '$dir'"
-                    fi
+
+            # Check and fix ownership if needed
+            if [ "$CURRENT_USER" = "root" ] && [ -n "$dir_owner" ]; then
+                current_owner=$(stat -c '%U' "$dir" 2>/dev/null || echo "unknown")
+                if [ "$current_owner" != "$dir_owner" ]; then
+                    echo -e "${YELLOW}Directory owned by $current_owner, changing to $dir_owner${NC}"
+                    sudo chown -R "$dir_owner:$dir_owner" "$dir" 2>/dev/null || true
                 fi
             fi
         fi
     done
-    
-    # Create default config file if it doesn't exist (with proper permissions)
+
+    # Create default config file if it doesn't exist
     if [ ! -f "config/bot_config.txt" ] && [ -d "config" ]; then
         echo -e "${YELLOW}Creating default configuration file...${NC}"
-        
-        # Check if we can write to config directory
-        if [ -w "config" ]; then
-            cat > "config/bot_config.txt" << EOF
+        cat > "config/bot_config.txt" << EOF
 # F-T CLI Bot Configuration
 # Generated on $(date)
 
@@ -127,49 +121,19 @@ create_directories_safe() {
 #use_pulseaudio=true
 #audio_driver=pulse
 EOF
-            success "Created configuration file"
-        else
-            error "Cannot write to config directory"
-            read -p "Create with sudo? (y/N): " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                sudo tee "config/bot_config.txt" > /dev/null << EOF
-# F-T CLI Bot Configuration
-# Generated on $(date)
-
-# Bot Settings
-# Replace with your bot token (or leave as is to use hardcoded one)
-#bot_token=YOUR_BOT_TOKEN_HERE
-
-# Audio Settings
-#ffmpeg_path=/usr/bin/ffmpeg
-#max_volume=100
-
-# Logging
-#log_level=INFO
-#max_log_size=10MB
-
-# Linux-specific settings
-#use_pulseaudio=true
-#audio_driver=pulse
-EOF
-                if [ $? -eq 0 ]; then
-                    sudo chown "$(whoami):$(id -gn)" "config/bot_config.txt"
-                    success "Created configuration file with sudo"
-                else
-                    error "Failed to create configuration file"
-                fi
-            fi
+        # Set ownership for config file
+        if [ "$CURRENT_USER" = "root" ] && [ -n "$dir_owner" ]; then
+            sudo chown "$dir_owner:$dir_owner" "config/bot_config.txt" 2>/dev/null || true
         fi
-    elif [ ! -d "config" ]; then
-        warning "Config directory not created, skipping config file creation"
+        success "Created configuration file"
     fi
 }
 
-# Check if running as root (needed for some installations)
+# Check if running as root
 check_root() {
-    if [ "$EUID" -eq 0 ]; then 
+    if [ "$EUID" -eq 0 ]; then
         echo "✓ Running with root privileges"
+        echo "Original user: $ORIGINAL_USER"
     else
         warning "Not running as root"
         warning "Some installations may require sudo rights"
@@ -208,10 +172,10 @@ manual_distro_select() {
     echo "5. Other (Manual installation required)"
     echo
     echo "==============================================="
-    
+
     while true; do
         read -p "Select option (1-5): " distro_choice
-        
+
         case $distro_choice in
             1)
                 DISTRO="debian"
@@ -295,10 +259,16 @@ install_system_packages() {
     return 0
 }
 
-# Install Python dependencies
+# Install Python dependencies for both users if needed
 install_python_deps() {
     log "Installing/updating Python dependencies..."
-    
+    echo "Current user: $CURRENT_USER"
+    echo "Original user: $ORIGINAL_USER"
+    echo
+
+    # List of packages to install
+    local packages=("discord.py[voice]" "yt-dlp" "pynacl" "tabulate" "pyyaml")
+
     echo "1. discord.py[voice] (Discord API library)"
     echo "2. yt-dlp (YouTube audio downloader)"
     echo "3. PyNaCl (Audio encryption)"
@@ -308,46 +278,93 @@ install_python_deps() {
     echo "This may take a few minutes..."
     echo
 
-    # Upgrade pip first
-    python3 -m pip install --upgrade pip
-    
-    # Install packages
-    local packages=("discord.py[voice]" "yt-dlp" "pynacl" "tabulate" "pyyaml")
-    local install_failed=0
-    
-    for package in "${packages[@]}"; do
-        log "Installing $package..."
-        if python3 -m pip install "$package" --upgrade; then
-            echo "✓ $package installed/updated"
-        else
-            error "Failed to install $package"
-            install_failed=1
-        fi
+    # Determine which users need installation
+    if [ "$CURRENT_USER" = "root" ] && [ -n "$ORIGINAL_USER" ] && [ "$ORIGINAL_USER" != "root" ]; then
+        echo -e "${YELLOW}Dual-user mode detected${NC}"
+        echo "Installing packages for:"
+        echo "1. Root (system-wide)"
+        echo "2. $ORIGINAL_USER (user-specific)"
         echo
-    done
 
-    echo "Verifying installations..."
-    echo
-    python3 -c "import discord; print('✓ discord.py version:', discord.__version__)" 2>/dev/null || echo "✗ discord.py failed"
-    python3 -c "import yt_dlp; print('✓ yt-dlp version:', yt_dlp.version.__version__)" 2>/dev/null || echo "✗ yt-dlp failed"
-    python3 -c "import nacl.secret; print('✓ PyNaCl imported')" 2>/dev/null || echo "✗ PyNaCl failed"
-    python3 -c "from tabulate import tabulate; print('✓ tabulate imported')" 2>/dev/null || echo "✗ tabulate failed"
-    python3 -c "import yaml; print('✓ PyYAML imported')" 2>/dev/null || echo "✗ PyYAML failed"
+        # Install for root
+        log "Installing packages for root (system-wide)..."
+        python3 -m pip install --upgrade pip
+        for package in "${packages[@]}"; do
+            if python3 -m pip install "$package" --upgrade; then
+                echo "✓ $package installed for root"
+            else
+                error "Failed to install $package for root"
+            fi
+        done
 
-    if [ $install_failed -eq 0 ]; then
-        success "All dependencies installed successfully"
+        # Install for original user
+        echo
+        log "Installing packages for $ORIGINAL_USER..."
+        sudo -u "$ORIGINAL_USER" python3 -m pip install --upgrade pip
+        for package in "${packages[@]}"; do
+            if sudo -u "$ORIGINAL_USER" python3 -m pip install "$package" --upgrade; then
+                echo "✓ $package installed for $ORIGINAL_USER"
+            else
+                error "Failed to install $package for $ORIGINAL_USER"
+            fi
+        done
+
+    elif [ "$CURRENT_USER" = "root" ]; then
+        # Just install for root
+        log "Installing packages for root (system-wide)..."
+        python3 -m pip install --upgrade pip
+        for package in "${packages[@]}"; do
+            if python3 -m pip install "$package" --upgrade; then
+                echo "✓ $package installed for root"
+            else
+                error "Failed to install $package for root"
+            fi
+        done
+
     else
-        warning "Some dependencies failed to install"
-        echo "Try running with sudo or install manually"
+        # Install for current user
+        log "Installing packages for $CURRENT_USER..."
+        python3 -m pip install --upgrade pip
+        for package in "${packages[@]}"; do
+            if python3 -m pip install "$package" --upgrade; then
+                echo "✓ $package installed for $CURRENT_USER"
+            else
+                error "Failed to install $package for $CURRENT_USER"
+            fi
+        done
     fi
-    
-    return $install_failed
+
+    echo
+    echo "Verifying installations..."
+    echo "========================="
+
+    # Check root packages
+    if [ "$CURRENT_USER" = "root" ]; then
+        echo "Root packages:"
+        python3 -c "import discord; print('  ✓ discord.py:', discord.__version__)" 2>/dev/null || echo "  ✗ discord.py failed"
+        python3 -c "import yt_dlp; print('  ✓ yt-dlp version:', yt_dlp.version.__version__)" 2>/dev/null || echo "  ✗ yt-dlp failed"
+        python3 -c "import nacl.secret; print('  ✓ PyNaCl imported')" 2>/dev/null || echo "  ✗ PyNaCl failed"
+        python3 -c "from tabulate import tabulate; print('  ✓ tabulate imported')" 2>/dev/null || echo "  ✗ tabulate failed"
+        python3 -c "import yaml; print('  ✓ PyYAML imported')" 2>/dev/null || echo "  ✗ PyYAML failed"
+    fi
+
+    # Check user packages if different from root
+    if [ -n "$ORIGINAL_USER" ] && [ "$ORIGINAL_USER" != "$CURRENT_USER" ]; then
+        echo
+        echo "User ($ORIGINAL_USER) packages:"
+        sudo -u "$ORIGINAL_USER" python3 -c "import discord; print('  ✓ discord.py found')" 2>/dev/null || echo "  ✗ discord.py failed"
+        sudo -u "$ORIGINAL_USER" python3 -c "import yt_dlp; print('  ✓ yt-dlp found')" 2>/dev/null || echo "  ✗ yt-dlp failed"
+        sudo -u "$ORIGINAL_USER" python3 -c "import nacl.secret; print('  ✓ PyNaCl found')" 2>/dev/null || echo "  ✗ PyNaCl failed"
+    fi
+
+    success "Dependencies installed successfully"
+    return 0
 }
 
 # Install FFmpeg
 install_ffmpeg() {
     log "Checking FFmpeg installation..."
-    
+
     if command -v ffmpeg &> /dev/null; then
         ffmpeg -version | head -n1
         success "FFmpeg is already installed"
@@ -396,18 +413,18 @@ verify_python() {
         error "Python 3 not found!"
         return 1
     fi
-    
+
     local python_version=$(python3 --version 2>&1 | cut -d' ' -f2)
     local major=$(echo $python_version | cut -d. -f1)
     local minor=$(echo $python_version | cut -d. -f2)
-    
+
     if [ "$major" -lt 3 ] || ([ "$major" -eq 3 ] && [ "$minor" -lt 8 ]); then
         warning "Python version $python_version detected. Python 3.8+ is recommended."
         read -p "Continue anyway? (y/N): " -n 1 -r
         echo
         [[ ! $REPLY =~ ^[Yy]$ ]] && return 1
     fi
-    
+
     success "Python $python_version verified"
     return 0
 }
@@ -415,7 +432,7 @@ verify_python() {
 # Create virtual environment
 create_venv() {
     log "Creating Python virtual environment..."
-    
+
     if [ -d "venv" ]; then
         read -p "Virtual environment already exists. Recreate? (y/N): " -n 1 -r
         echo
@@ -424,11 +441,11 @@ create_venv() {
         fi
         rm -rf venv
     fi
-    
+
     python3 -m venv venv
     if [ $? -eq 0 ]; then
         success "Virtual environment created"
-        
+
         # Create venv launcher script
         cat > "run_venv.sh" << 'EOF'
 #!/bin/bash
@@ -460,51 +477,97 @@ echo "Deactivating virtual environment..."
 deactivate
 EOF
         chmod +x run_venv.sh
-        echo "Created 'run_venv.sh' to run bot in virtual environment"
+
+        # Install packages in venv
+        log "Installing packages in virtual environment..."
+        source venv/bin/activate
+        pip install discord.py[voice] yt-dlp pynacl tabulate pyyaml
+        deactivate
+
+        success "Created virtual environment with all dependencies"
     else
         error "Failed to create virtual environment"
         return 1
     fi
 }
 
-# Run the bot
+# Run the bot with proper user detection
 run_bot() {
     log "Starting F-T CLI Bot..."
-    
+    echo "Current user: $CURRENT_USER"
+    echo "Original user: $ORIGINAL_USER"
+    echo
+
     # Check if main script exists
     if [ ! -f "F-T_CLI_v0.3.1.py" ]; then
         error "Main bot script F-T_CLI_v0.3.1.py not found!"
         return 1
     fi
-    
+
     # Check and create directories if needed
     create_directories_safe
-    
-    # Activate virtual environment if using one
+
+    # Check for virtual environment first
     if [ -d "venv" ] && [ -f "venv/bin/activate" ]; then
-        log "Activating virtual environment..."
+        log "Using virtual environment..."
         source venv/bin/activate
+        PYTHON_CMD="python"
+    else
+        # Determine which Python to use based on user
+        if [ "$CURRENT_USER" = "root" ] && [ -n "$ORIGINAL_USER" ] && [ "$ORIGINAL_USER" != "root" ]; then
+            echo -e "${YELLOW}Running as root, but original user is $ORIGINAL_USER${NC}"
+            echo "Options:"
+            echo "1. Run as root (system Python)"
+            echo "2. Run as $ORIGINAL_USER (user Python)"
+            echo "3. Exit"
+            echo
+            read -p "Choose option (1/2/3): " run_choice
+
+            case $run_choice in
+                1)
+                    PYTHON_CMD="python3"
+                    ;;
+                2)
+                    log "Running as $ORIGINAL_USER..."
+                    sudo -u "$ORIGINAL_USER" python3 F-T_CLI_v0.3.1.py
+                    return $?
+                    ;;
+                3)
+                    exit 0
+                    ;;
+                *)
+                    echo "Invalid choice, running as root"
+                    PYTHON_CMD="python3"
+                    ;;
+            esac
+        else
+            PYTHON_CMD="python3"
+        fi
     fi
-    
+
     # Set Python environment variables
     export PYTHONIOENCODING=utf-8
     export PYTHONUNBUFFERED=1
     export PYTHONFAULTHANDLER=1
-    
-    # Create log directory if it doesn't exist (double-check)
+
+    # Create log directory if it doesn't exist
     if [ ! -d "logs" ]; then
-        echo -e "${YELLOW}Logs directory missing, creating...${NC}"
-        mkdir -p logs 2>/dev/null || sudo mkdir -p logs && sudo chown "$(whoami):$(id -gn)" logs
+        mkdir -p logs 2>/dev/null || sudo mkdir -p logs
+        if [ "$CURRENT_USER" = "root" ] && [ -n "$ORIGINAL_USER" ]; then
+            sudo chown "$ORIGINAL_USER:$ORIGINAL_USER" logs 2>/dev/null || true
+        fi
     fi
-    
+
     local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
     local log_file="logs/bot_$timestamp.log"
-    
+
     echo "==============================================="
     echo "        RUNNING F-T CLI BOT"
     echo "==============================================="
     echo
     echo "Starting Discord bot..."
+    echo "Running as: $(whoami)"
+    echo "Python command: $PYTHON_CMD"
     echo
     echo "IMPORTANT: Keep this window open while bot is running"
     echo "Press Ctrl+C to stop the bot"
@@ -513,19 +576,19 @@ run_bot() {
     echo "Downloaded audio will be saved to 'downloads/' folder"
     echo
     echo "Log file: $log_file"
-    echo "Python: $(python3 --version)"
+    echo "Python: $($PYTHON_CMD --version 2>&1)"
     echo
     echo "==============================================="
     echo
-    
+
     # Run bot with logging
-    python3 F-T_CLI_v0.3.1.py 2>&1 | tee "$log_file"
-    
+    $PYTHON_CMD F-T_CLI_v0.3.1.py 2>&1 | tee "$log_file"
+
     local exit_code=${PIPESTATUS[0]}
-    
+
     echo "==============================================="
     log "Bot stopped with exit code: $exit_code"
-    
+
     return $exit_code
 }
 
@@ -567,7 +630,13 @@ system_info() {
     echo "Kernel: $(uname -r)"
     echo "Architecture: $(uname -m)"
     echo
-    echo "Python: $(python3 --version 2>/dev/null || echo 'Not found')"
+    echo "Current user: $(whoami)"
+    echo "Original user: ${ORIGINAL_USER:-N/A}"
+    echo
+    echo "Python (system): $(python3 --version 2>/dev/null || echo 'Not found')"
+    if [ -n "$ORIGINAL_USER" ] && [ "$ORIGINAL_USER" != "$(whoami)" ]; then
+        echo "Python ($ORIGINAL_USER): $(sudo -u "$ORIGINAL_USER" python3 --version 2>/dev/null || echo 'Not found')"
+    fi
     echo "Pip: $(python3 -m pip --version 2>/dev/null | cut -d' ' -f2 || echo 'Not found')"
     echo "FFmpeg: $(ffmpeg -version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo 'Not found')"
     echo
@@ -589,10 +658,10 @@ post_run_menu() {
     echo "3. Return to main menu"
     echo "4. Exit"
     echo
-    
+
     while true; do
         read -p "Select option (1-4): " post_choice
-        
+
         case $post_choice in
             1)
                 echo
@@ -636,6 +705,10 @@ main_menu() {
     echo "==============================================="
     echo "        MAIN MENU - F-T CLI BOT"
     echo "==============================================="
+    echo "Current user: $(whoami)"
+    if [ -n "$ORIGINAL_USER" ] && [ "$ORIGINAL_USER" != "$(whoami)" ]; then
+        echo "Original user: $ORIGINAL_USER"
+    fi
     echo
     echo "1. Complete Auto-Setup (Recommended for first time)"
     echo "2. Run Bot Only (Skip installations)"
@@ -658,6 +731,12 @@ main() {
     echo "        F-T CLI DISCORD BOT - COMPLETE SETUP"
     echo "==============================================="
     echo
+    echo "Current user: $(whoami)"
+    if [ -n "$ORIGINAL_USER" ] && [ "$ORIGINAL_USER" != "$(whoami)" ]; then
+        echo "Original user: $ORIGINAL_USER"
+        echo -e "${YELLOW}Note: Running with sudo${NC}"
+    fi
+    echo
     echo "This script will:"
     echo "1. Install Python 3.11 if needed"
     echo "2. Install all required pip packages"
@@ -668,10 +747,10 @@ main() {
     echo "Terminal will remain open to show all output"
     echo "==============================================="
     echo
-    
+
     # Check root
     check_root
-    
+
     # Detect distribution
     if ! detect_distro; then
         warning "Auto-detection failed"
@@ -680,12 +759,12 @@ main() {
             exit 1
         fi
     fi
-    
+
     # Main loop
     while true; do
         main_menu
         read -p "Select option (1-9): " choice
-        
+
         case $choice in
             1)
                 # Complete auto-setup
@@ -697,39 +776,39 @@ main() {
                 echo "Starting complete setup process..."
                 echo "This may take several minutes."
                 echo
-                
+
                 # Step 1: Check/Install Python
                 echo "Step 1: Checking Python installation..."
                 if ! verify_python; then
                     install_system_packages
                     verify_python || continue
                 fi
-                
+
                 # Step 2: Update pip
                 echo
                 echo "Step 2: Updating pip..."
                 python3 -m pip install --upgrade pip
-                
+
                 # Step 3: Install FFmpeg
                 echo
                 echo "Step 3: Installing FFmpeg..."
                 install_ffmpeg
-                
+
                 # Step 4: Install Python dependencies
                 echo
                 echo "Step 4: Installing Python dependencies..."
                 install_python_deps
-                
+
                 # Step 5: Create directories
                 echo
                 echo "Step 5: Creating necessary directories..."
                 create_directories_safe
-                
+
                 # Step 6: Create configuration file
                 echo
                 echo "Step 6: Setting up configuration..."
                 echo "✓ Configuration complete"
-                
+
                 echo
                 echo "==============================================="
                 echo "SETUP COMPLETE!"
