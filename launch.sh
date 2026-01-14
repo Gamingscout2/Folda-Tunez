@@ -13,6 +13,35 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Function to create directories with sudo if needed
+create_dirs_if_needed() {
+    local dirs=("downloads" "logs" "config")
+    
+    for dir in "${dirs[@]}"; do
+        if [ ! -d "$dir" ]; then
+            echo -e "${YELLOW}Directory '$dir' doesn't exist.${NC}"
+            read -p "Create it? (y/N): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                # Check if we have write permissions
+                if [ -w "." ]; then
+                    mkdir -p "$dir" && echo -e "${GREEN}Created '$dir'${NC}"
+                else
+                    echo -e "${YELLOW}No write permission. Creating with sudo...${NC}"
+                    sudo mkdir -p "$dir"
+                    if [ $? -eq 0 ]; then
+                        # Fix ownership if created with sudo
+                        sudo chown "$(whoami):$(id -gn)" "$dir"
+                        echo -e "${GREEN}Created '$dir' with sudo${NC}"
+                    else
+                        echo -e "${RED}Failed to create '$dir'${NC}"
+                    fi
+                fi
+            fi
+        fi
+    done
+}
+
 # Display header
 clear
 echo "==============================================="
@@ -34,6 +63,10 @@ case $quick_choice in
     [Rr])
         clear
         echo "Starting bot now..."
+        
+        # Check and create directories if needed
+        create_dirs_if_needed
+        
         sleep 2
         
         # Check if Python script exists
