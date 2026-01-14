@@ -1,5 +1,7 @@
 """
 Folda Tunez Discord Bot
+-- LINUX BRANCH --
+-- Changes to Log Filesystem --
 by Preston Parsons
 01/07/2025
 Version 0.3.1 Updated 11/17/2025 - Queue System & Playback Stability Fix
@@ -373,7 +375,7 @@ class AdminCLI(Cmd):
     def __init__(self, bot):
         super().__init__()
         self.bot = bot
-        self.logger = setup_logger('cli', 'cli.log')
+        self.logger = setup_logger('cli', 'logs/cli.log')
 
     def _log_and_print(self, message, level='info'):
         log_method = getattr(self.logger, level)
