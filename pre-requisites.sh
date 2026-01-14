@@ -31,6 +31,141 @@ warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+# Function to create directories with sudo if needed
+create_directories_safe() {
+    log "Creating necessary directories..."
+    
+    local dirs=("downloads" "logs" "config")
+    
+    for dir in "${dirs[@]}"; do
+        if [ ! -d "$dir" ]; then
+            echo -e "${YELLOW}Directory '$dir' doesn't exist.${NC}"
+            read -p "Create it? (y/N): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                # Check if we have write permissions in current directory
+                if [ -w "." ]; then
+                    mkdir -p "$dir"
+                    if [ $? -eq 0 ]; then
+                        log "Created directory: $dir"
+                    else
+                        error "Failed to create '$dir' with normal permissions"
+                        read -p "Try with sudo? (y/N): " -n 1 -r
+                        echo
+                        if [[ $REPLY =~ ^[Yy]$ ]]; then
+                            sudo mkdir -p "$dir"
+                            if [ $? -eq 0 ]; then
+                                # Fix ownership if created with sudo
+                                sudo chown "$(whoami):$(id -gn)" "$dir"
+                                success "Created '$dir' with sudo"
+                            else
+                                error "Failed to create '$dir' even with sudo"
+                            fi
+                        fi
+                    fi
+                else
+                    echo -e "${YELLOW}No write permission in current directory.${NC}"
+                    read -p "Create with sudo? (y/N): " -n 1 -r
+                    echo
+                    if [[ $REPLY =~ ^[Yy]$ ]]; then
+                        sudo mkdir -p "$dir"
+                        if [ $? -eq 0 ]; then
+                            # Fix ownership if created with sudo
+                            sudo chown "$(whoami):$(id -gn)" "$dir"
+                            success "Created '$dir' with sudo"
+                        else
+                            error "Failed to create '$dir' with sudo"
+                        fi
+                    fi
+                fi
+            else
+                warning "Skipping directory '$dir' creation"
+            fi
+        else
+            log "Directory already exists: $dir"
+            
+            # Check if we have write permissions to existing directory
+            if [ ! -w "$dir" ]; then
+                warning "No write permission in '$dir'"
+                read -p "Fix permissions with sudo? (y/N): " -n 1 -r
+                echo
+                if [[ $REPLY =~ ^[Yy]$ ]]; then
+                    sudo chown "$(whoami):$(id -gn)" "$dir"
+                    if [ $? -eq 0 ]; then
+                        success "Fixed permissions for '$dir'"
+                    else
+                        error "Failed to fix permissions for '$dir'"
+                    fi
+                fi
+            fi
+        fi
+    done
+    
+    # Create default config file if it doesn't exist (with proper permissions)
+    if [ ! -f "config/bot_config.txt" ] && [ -d "config" ]; then
+        echo -e "${YELLOW}Creating default configuration file...${NC}"
+        
+        # Check if we can write to config directory
+        if [ -w "config" ]; then
+            cat > "config/bot_config.txt" << EOF
+# F-T CLI Bot Configuration
+# Generated on $(date)
+
+# Bot Settings
+# Replace with your bot token (or leave as is to use hardcoded one)
+#bot_token=YOUR_BOT_TOKEN_HERE
+
+# Audio Settings
+#ffmpeg_path=/usr/bin/ffmpeg
+#max_volume=100
+
+# Logging
+#log_level=INFO
+#max_log_size=10MB
+
+# Linux-specific settings
+#use_pulseaudio=true
+#audio_driver=pulse
+EOF
+            success "Created configuration file"
+        else
+            error "Cannot write to config directory"
+            read -p "Create with sudo? (y/N): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                sudo tee "config/bot_config.txt" > /dev/null << EOF
+# F-T CLI Bot Configuration
+# Generated on $(date)
+
+# Bot Settings
+# Replace with your bot token (or leave as is to use hardcoded one)
+#bot_token=YOUR_BOT_TOKEN_HERE
+
+# Audio Settings
+#ffmpeg_path=/usr/bin/ffmpeg
+#max_volume=100
+
+# Logging
+#log_level=INFO
+#max_log_size=10MB
+
+# Linux-specific settings
+#use_pulseaudio=true
+#audio_driver=pulse
+EOF
+                if [ $? -eq 0 ]; then
+                    sudo chown "$(whoami):$(id -gn)" "config/bot_config.txt"
+                    success "Created configuration file with sudo"
+                else
+                    error "Failed to create configuration file"
+                fi
+            fi
+        fi
+    elif [ ! -d "config" ]; then
+        warning "Config directory not created, skipping config file creation"
+    fi
+}
+
 # Check if running as root (needed for some installations)
 check_root() {
     if [ "$EUID" -eq 0 ]; then 
@@ -255,45 +390,6 @@ install_ffmpeg() {
     fi
 }
 
-# Create necessary directories
-create_directories() {
-    log "Creating necessary directories..."
-    
-    local dirs=("downloads" "logs" "config")
-    
-    for dir in "${dirs[@]}"; do
-        if [ ! -d "$dir" ]; then
-            mkdir -p "$dir"
-            log "Created directory: $dir"
-        fi
-    done
-    
-    # Create default config file if it doesn't exist
-    if [ ! -f "config/bot_config.txt" ]; then
-        cat > "config/bot_config.txt" << EOF
-# F-T CLI Bot Configuration
-# Generated on $(date)
-
-# Bot Settings
-# Replace with your bot token (or leave as is to use hardcoded one)
-#bot_token=YOUR_BOT_TOKEN_HERE
-
-# Audio Settings
-#ffmpeg_path=/usr/bin/ffmpeg
-#max_volume=100
-
-# Logging
-#log_level=INFO
-#max_log_size=10MB
-
-# Linux-specific settings
-#use_pulseaudio=true
-#audio_driver=pulse
-EOF
-        success "Created configuration file"
-    fi
-}
-
 # Verify Python installation
 verify_python() {
     if ! command -v python3 &> /dev/null; then
@@ -381,6 +477,9 @@ run_bot() {
         return 1
     fi
     
+    # Check and create directories if needed
+    create_directories_safe
+    
     # Activate virtual environment if using one
     if [ -d "venv" ] && [ -f "venv/bin/activate" ]; then
         log "Activating virtual environment..."
@@ -392,9 +491,10 @@ run_bot() {
     export PYTHONUNBUFFERED=1
     export PYTHONFAULTHANDLER=1
     
-    # Create log directory if it doesn't exist
+    # Create log directory if it doesn't exist (double-check)
     if [ ! -d "logs" ]; then
-        mkdir -p logs
+        echo -e "${YELLOW}Logs directory missing, creating...${NC}"
+        mkdir -p logs 2>/dev/null || sudo mkdir -p logs && sudo chown "$(whoami):$(id -gn)" logs
     fi
     
     local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
@@ -623,7 +723,7 @@ main() {
                 # Step 5: Create directories
                 echo
                 echo "Step 5: Creating necessary directories..."
-                create_directories
+                create_directories_safe
                 
                 # Step 6: Create configuration file
                 echo
@@ -635,7 +735,7 @@ main() {
                 echo "SETUP COMPLETE!"
                 echo "==============================================="
                 echo
-                read -p "Press Enter to run the bot..."
+                read -p "Press Enter to run the bot..." -r
                 run_bot
                 post_run_menu
                 ;;
@@ -647,25 +747,25 @@ main() {
                 clear
                 install_python_deps
                 echo
-                read -p "Press Enter to return to main menu..."
+                read -p "Press Enter to return to main menu..." -r
                 ;;
             4)
                 clear
                 install_ffmpeg
                 echo
-                read -p "Press Enter to return to main menu..."
+                read -p "Press Enter to return to main menu..." -r
                 ;;
             5)
                 clear
                 create_venv
                 echo
-                read -p "Press Enter to return to main menu..."
+                read -p "Press Enter to return to main menu..." -r
                 ;;
             6)
                 clear
                 open_logs
                 echo
-                read -p "Press Enter to return to main menu..."
+                read -p "Press Enter to return to main menu..." -r
                 ;;
             7)
                 clear
@@ -675,7 +775,7 @@ main() {
                 clear
                 system_info
                 echo
-                read -p "Press Enter to continue..."
+                read -p "Press Enter to continue..." -r
                 ;;
             9)
                 echo
