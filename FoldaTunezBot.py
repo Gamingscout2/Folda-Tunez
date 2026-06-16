@@ -1210,4 +1210,4 @@ async def on_voice_state_update(member, before, after):
             await member.guild.voice_client.disconnect(force=True)
 
 if __name__ == "__main__":
-    bot.run(')
+    bot.run('YOUR_TOKEN_HERE')
