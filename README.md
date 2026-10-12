@@ -34,4 +34,4 @@ Version 2.4 Updated 03/18/2025
 
 
 Subject to the license terms found at: https://sirobivan.org/pcl1-1.html
-Copyright 2025 Preston Parsons and Parsons Computing 
+Copyright 2025 Phaedra Parsons
