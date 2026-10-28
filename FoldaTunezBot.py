@@ -23,8 +23,8 @@ from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, List, Any, Union
 
-import discord
-from discord.ext import commands
+import discord  # type: ignore[reportMissingImports]
+from discord.ext import commands  # type: ignore[reportMissingImports]
 import yt_dlp as youtube_dl
 from discord.ui import View, Button
 
