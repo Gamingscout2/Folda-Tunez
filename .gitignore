@@ -31,3 +31,8 @@ yt_dlp.log
 cli.log
 downloads/
 old.py
+old/
+
+# Python bytecode
+__pycache__/
+*.py[cod]

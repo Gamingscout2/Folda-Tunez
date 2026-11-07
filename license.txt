@@ -49,7 +49,7 @@ IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
 Termination
 This License and the rights granted hereunder will terminate automatically upon any breach by You of the terms of this License. Upon termination, You must cease all use, reproduction, and distribution of the Work and Derivative Works.
 
-Copyright (c) 2024 Preston Parsons
+Copyright (c) 2024 Phaedra Parsons
 
 Licensed under the Parsons Computing License v1.1 (the "License"). You may obtain a copy of the License at https://sirobivan.org/pcl1-1.html.
 
