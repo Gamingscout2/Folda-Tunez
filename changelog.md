@@ -1,5 +1,14 @@
 # Changelog
 
+## Voice diagnostics
+
+- `FOLDA_DEBUG_VOICE=1` writes discord.py voice/player debug lines to `bot.log` (gateway excluded
+  because its debug output contains secrets).
+- Playback now warns in the log and in chat when the bot lacks Speak permission in the voice
+  channel, is server-muted, or is suppressed. The connection works in all three cases but the
+  audio is never heard.
+- `bot.log` records when each track ends, how long it played and any error.
+
 ## CLI console: history, tab completion, guild lookup, right-click copy
 
 - Up/Down arrows walk through command history, saved in `Bot-Files/botbash.history` (created by

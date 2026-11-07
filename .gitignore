@@ -26,3 +26,6 @@ __pypackages__/
 
 # CLI command history (generated at runtime)
 botbash.history
+bot.log
+yt_dlp.log
+cli.log

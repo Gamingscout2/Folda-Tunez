@@ -107,6 +107,28 @@ class GuildState:
             bot_logger.warning(f"Safe send failed in guild {self.guild_id}: {e}")
             return None
 
+    async def _warn_if_cannot_speak(self, ctx):
+        """Joining works without Speak permission, the audio is just never heard."""
+        try:
+            vc = ctx.guild.voice_client
+            me = ctx.guild.me
+            if not vc or not vc.channel or not me:
+                return
+            problems = []
+            if not vc.channel.permissions_for(me).speak:
+                problems.append("the bot lacks the Speak permission in this voice channel")
+            vs = me.voice
+            if vs and vs.mute:
+                problems.append("the bot is server-muted")
+            if vs and vs.suppress:
+                problems.append("the bot is suppressed (stage channel, needs to be invited to speak)")
+            if problems:
+                msg = "Audio will be silent: " + "; ".join(problems) + "."
+                bot_logger.warning(f"Guild {self.guild_id} channel '{vc.channel.name}': {msg}")
+                await self._safe_send(ctx, msg)
+        except Exception:
+            bot_logger.error(f"Speak check failed: {traceback.format_exc()}")
+
     async def _play_next_safe(self, ctx):
         try:
             if self.playback_active or (ctx.voice_client and ctx.voice_client.is_playing()):
@@ -221,13 +243,20 @@ class GuildState:
                 return
 
             loop = asyncio.get_running_loop()
+            started_at = time.time()
 
             def after_playback(error):
                 self.playback_active = False
                 self.is_playing = False
+                bot_logger.info(
+                    f"Playback ended in guild {self.guild_id} after "
+                    f"{time.time() - started_at:.1f}s (error={error})"
+                )
                 if error:
                     bot_logger.error(f"Playback error in guild {self.guild_id}: {error}")
                 asyncio.run_coroutine_threadsafe(self._play_next_safe(ctx), loop)
+
+            await self._warn_if_cannot_speak(ctx)
 
             try:
                 ctx.guild.voice_client.play(source, after=after_playback)
