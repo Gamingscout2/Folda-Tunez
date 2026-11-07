@@ -1,6 +1,7 @@
 """Bot entry point, events, and slash-command registration."""
 
 import asyncio
+import logging
 import subprocess
 
 import discord
@@ -9,20 +10,80 @@ from discord.ext import commands
 
 from admin_cli import AdminCLI
 from config import BOT_PREFIX, FFMPEG_PATH, TOKEN, VOICE_TIMEOUT
+from console import ConsoleManager, ConsoleLogHandler
 from contexts import InteractionContext
 from guild_state import cleanup_all_downloads, guild_states
-from loggers import bot_logger
+from loggers import bot_logger, cli_logger, yt_logger
 from music import Music
 from runtime import last_join_channels, stay_247
 
-import discord
-if not discord.opus.is_loaded():
-    discord.opus.load_opus("libopus.so.0")
 
+# ==================== Audio: load libopus ====================
+def _load_opus() -> bool:
+    """discord.py does not auto-load libopus on Linux. Load it explicitly."""
+    if discord.opus.is_loaded():
+        bot_logger.info("libopus already loaded")
+        return True
+
+    candidates = [
+        "libopus.so.0",
+        "libopus.so",
+        "/lib64/libopus.so.0",
+        "/usr/lib/x86_64-linux-gnu/libopus.so.0",
+        "/usr/lib/libopus.so.0",
+        "/usr/local/lib/libopus.so.0",
+    ]
+    for path in candidates:
+        try:
+            discord.opus.load_opus(path)
+            if discord.opus.is_loaded():
+                bot_logger.info(f"Loaded libopus from '{path}'")
+                return True
+        except Exception:
+            continue
+
+    bot_logger.critical(
+        "Could not load libopus - voice playback will be SILENT. "
+        "Install libopus0 and verify with: ldconfig -p | grep opus"
+    )
+    return False
+
+
+# ==================== Console ====================
+console = ConsoleManager()
+
+
+def _setup_console_logging():
+    """Route python logging through ConsoleLogHandler; remove raw StreamHandlers."""
+    console_handler = ConsoleLogHandler(console)
+
+    for logger in (bot_logger, cli_logger, yt_logger):
+        # Keep FileHandlers, remove only plain StreamHandlers (console output)
+        logger.handlers = [
+            h for h in logger.handlers
+            if isinstance(h, logging.FileHandler)
+            or not isinstance(h, logging.StreamHandler)
+        ]
+        logger.addHandler(console_handler)
+
+    # Also route discord.py loggers through the console
+    for name in (
+        'discord', 'discord.client', 'discord.gateway',
+        'discord.voice_state', 'discord.voice_client', 'discord.player',
+    ):
+        lg = logging.getLogger(name)
+        lg.handlers = [h for h in lg.handlers if isinstance(h, logging.FileHandler)]
+        lg.addHandler(console_handler)
+
+
+_setup_console_logging()
+
+
+# ==================== Bot ====================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-intents.members = True  # needed for !dj and CLI members listing
+intents.members = True
 
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, case_insensitive=True)
 
@@ -86,14 +147,30 @@ async def _register_slash_commands():
 @bot.event
 async def on_ready():
     bot_logger.info(f"Logged in as {bot.user}")
-    print(f"Folda Tunez v0.5.3 - Logged in as {bot.user}")
     bot.remove_command('help')
     await bot.add_cog(Music(bot))
-
     await _register_slash_commands()
 
-    cli = AdminCLI(bot)
-    bot.loop.create_task(cli.run_async())
+    # Status bar callback (bottom row of the console)
+    def status_text() -> str:
+        playing = sum(
+            1 for g in bot.guilds
+            if guild_states.get(g.id) and guild_states[g.id].is_playing
+        )
+        parts = [
+            f"Guilds:{len(bot.guilds)}",
+            f"Latency:{bot.latency * 1000:.0f}ms",
+        ]
+        if playing:
+            parts.append(f"Playing:{playing}")
+        if console.guild_filter:
+            parts.append(f"FILTER:guild {console.guild_filter}")
+        return " | ".join(parts)
+
+    console.status_callback = status_text
+
+    cli = AdminCLI(bot, console)
+    asyncio.create_task(cli.run_async(), name="admin-cli")
 
     try:
         subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, check=True)
@@ -132,7 +209,12 @@ async def on_voice_state_update(member, before, after):
 @bot.event
 async def on_close():
     await cleanup_all_downloads()
+    console.cleanup()
 
 
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    _load_opus()
+    try:
+        bot.run(TOKEN)
+    except KeyboardInterrupt:
+        console.cleanup()
