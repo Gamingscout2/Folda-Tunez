@@ -23,3 +23,6 @@ __pypackages__/
 .env.*.local
 .github/
 .github/workflows/
+
+# CLI command history (generated at runtime)
+botbash.history

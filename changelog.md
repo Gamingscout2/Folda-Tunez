@@ -1,6 +1,24 @@
 # Changelog
 
-## Voice playback fix and dependency script refactor
+## CLI console: history, tab completion, guild lookup, right-click copy
+
+- Up/Down arrows walk through command history, saved in `Bot-Files/botbash.history` (created by
+  the bot on first start with mode 600, capped at 1000 entries, git-ignored). Override the path
+  with `FOLDA_HISTORY_FILE`.
+- Tab completes command names, guilds, `filter` names, `status` types and `guildlog` subcommands.
+  Multiple matches extend the common prefix, then list the options.
+- `<guild>` accepts the bot id, the real guild id, or the guild name (case-insensitive, exact or
+  unique prefix; quote names with spaces, e.g. `"My Server"`; unquoted full names also work).
+  Ambiguous names print the matches instead of guessing. Mistyped guilds now print an error
+  instead of failing silently.
+- Hold right mouse button and drag over the log area to select text; on release it is copied
+  to the clipboard. A right click without dragging copies everything visible. Uses OSC 52
+  (Windows Terminal, iTerm2, kitty, WezTerm, tmux, ...) plus `wl-copy`/`xclip`/`xsel`/`pbcopy`
+  when installed. Shift+drag still uses the terminal's own selection.
+- Escape-sequence reader now reads exactly one sequence at a time, so fast mouse drags no longer
+  swallow arrow keys.
+
+## V0.5.3 Voice playback fix and dependency script refactor
 
 ### Fixed
 - No audio after joining voice: `InteractionContext` and `MockContext` (`contexts.py`) cached

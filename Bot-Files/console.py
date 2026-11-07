@@ -6,31 +6,45 @@ Features:
   - Mouse-wheel scroll (SGR mouse tracking, mode 1000+1006)
   - PageUp / PageDown scroll by one screen
   - Esc clears the current input buffer
+  - Up/Down arrows walk through command history, persisted in botbash.history
+    (override the location with FOLDA_HISTORY_FILE)
+  - Tab completes commands/arguments via the `completer` callback
+  - Hold right mouse button and drag over the log area to select text; on
+    release the selection is copied to the clipboard. A right click without
+    dragging copies everything currently visible in the log area.
   - New logs arriving while scrolled up are buffered with a "N new below"
     indicator in the status bar; jumping back to bottom replays them
   - Resize-aware (SIGWINCH)
   - Falls back to plain print/input on non-TTY (systemd, redirected output)
 
 NOTE: enabling mouse tracking intercepts normal clicks. Hold SHIFT while
-dragging to select text (standard terminal behavior). On exit the terminal
-is restored via the atexit handler; if you ever see a garbled terminal,
-run `reset` or `stty sane`.
+dragging to use the terminal's own text selection instead. Clipboard copy
+uses the OSC 52 escape (needs terminal support; Windows Terminal, iTerm2,
+kitty, WezTerm, tmux with set-clipboard on) plus wl-copy/xclip/xsel/pbcopy
+when one is installed. On exit the terminal is restored via the atexit
+handler; if you ever see a garbled terminal, run `reset` or `stty sane`.
 """
 
 import atexit
+import base64
 import logging
 import os
 import re
 import select
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 import termios
 import time
 import tty
 from collections import defaultdict, deque
-from typing import Callable, Deque, Dict, Optional
+from typing import Callable, Deque, Dict, List, Optional, Tuple
+
+HISTORY_FILE_DEFAULT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'botbash.history'
+)
 
 
 # ---------- sanitization ----------
@@ -50,7 +64,8 @@ class ConsoleManager:
     GUILD_RE = re.compile(r'\bguild (\d+)\b')
 
     def __init__(self, prompt: str = "FoldaTunez> ", guild_log_size: int = 500,
-                 log_history: int = 5000, scroll_step: int = 3):
+                 log_history: int = 5000, scroll_step: int = 3,
+                 history_file: Optional[str] = None, history_size: int = 1000):
         self.prompt = prompt
         self.guild_log_size = guild_log_size
         self.scroll_step = scroll_step
@@ -79,6 +94,27 @@ class ConsoleManager:
         self.loop = None
         self.on_command: Optional[Callable[[str], None]] = None
         self.status_callback: Optional[Callable[[], str]] = None
+        # completer(text_before_cursor) -> (token_start_index, candidates)
+        self.completer: Optional[Callable[[str], Tuple[int, List[str]]]] = None
+
+        # Command history (Up/Down), persisted to disk
+        self.history_file = (
+            history_file or os.getenv('FOLDA_HISTORY_FILE') or HISTORY_FILE_DEFAULT
+        )
+        self.history_size = history_size
+        self.history: List[str] = []
+        self._hist_idx = 0
+        self._hist_stash = ""
+        self._load_history()
+
+        # Right-button drag selection (copy to clipboard)
+        self._sel_active = False
+        self._sel_moved = False
+        self._sel_anchor = (1, 1)
+        self._sel_cur = (1, 1)
+        self._sel_lines: List[str] = []
+        self._flash_text = ""
+        self._flash_until = 0.0
 
         self._enabled = bool(sys.stdout.isatty() and sys.stdin.isatty())
         self._reader_thread: Optional[threading.Thread] = None
@@ -103,8 +139,8 @@ class ConsoleManager:
         self._raw_write('\033[2J')
         self._raw_write(f'\033[{self.scroll_bottom};1H')
 
-        # Enable SGR mouse tracking (1000 = basic, 1006 = SGR coords)
-        self._raw_write('\033[?1000h\033[?1006h')
+        # SGR mouse tracking (1002 = press/release + drag motion, 1006 = SGR coords)
+        self._raw_write('\033[?1002h\033[?1006h')
         self.mouse_enabled = True
 
         self._render_input()
@@ -150,6 +186,9 @@ class ConsoleManager:
             extra += "] "
             status = extra + status
 
+        if self._flash_text and time.time() < self._flash_until:
+            status = f"[{self._flash_text}] " + status
+
         with self.lock:
             self._raw_write(f'\033[{self.status_row};1H')
             self._raw_write('\033[2K')
@@ -166,10 +205,10 @@ class ConsoleManager:
             return
 
         for raw_line in msg.split('\n'):
-            line = _sanitize(raw_line)
+            line = _sanitize(raw_line).expandtabs(8)   # keeps screen columns == string indexes
             self.log_buffer.append(line)
 
-            if self.scroll_offset == 0:
+            if self.scroll_offset == 0 and not self._sel_active:
                 with self.lock:
                     self._raw_write('\0337')                    # save cursor
                     self._raw_write(f'\033[{self.scroll_bottom};1H')
@@ -178,8 +217,8 @@ class ConsoleManager:
             else:
                 self.pending_new_logs += 1
 
-    def _redraw_log_region(self):
-        """Repaint the scroll region from log_buffer at current scroll_offset."""
+    def _visible_lines(self) -> List[str]:
+        """Lines currently shown in the scroll region (index 0 = row 1)."""
         visible_height = self.scroll_bottom
         total = len(self.log_buffer)
         end_idx = total - self.scroll_offset
@@ -187,6 +226,11 @@ class ConsoleManager:
         visible = list(self.log_buffer)[start_idx:end_idx]
         while len(visible) < visible_height:
             visible.insert(0, '')
+        return visible
+
+    def _redraw_log_region(self):
+        """Repaint the scroll region from log_buffer at current scroll_offset."""
+        visible = self._visible_lines()
 
         with self.lock:
             buf = ['\0337']                                     # save cursor
@@ -221,24 +265,226 @@ class ConsoleManager:
         if new_offset == 0:
             self.pending_new_logs = 0
 
+    _MOUSE_RE = re.compile(r'\x1b?\[<(\d+);(\d+);(\d+)([Mm])')
+
     def _handle_mouse(self, seq: bytes):
-        """Handle SGR mouse event: \033[<button;x;yM or m."""
+        """Handle SGR mouse events: ESC [ < button ; x ; y (M press/motion | m release)."""
+        s = seq.decode('ascii', errors='ignore')
+        for m in self._MOUSE_RE.finditer(s):
+            try:
+                code, x, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                self._mouse_event(code, x, y, m.group(4) == 'M')
+            except Exception:
+                pass
+
+    def _mouse_event(self, code: int, x: int, y: int, pressed: bool):
+        motion = bool(code & 32)
+        base = code & ~(4 | 8 | 16 | 32)     # strip shift/meta/ctrl/motion bits
+        if base == 64:                        # wheel up
+            self._handle_scroll('up')
+        elif base == 65:                      # wheel down
+            self._handle_scroll('down')
+        elif base == 2:                       # right button
+            if not pressed:
+                self._sel_finish()
+            elif motion:
+                self._sel_update(y, x)
+            else:
+                self._sel_start(y, x)
+
+    # ---------- right-button selection + clipboard ----------
+    def _clamp_pos(self, row: int, col: int) -> Tuple[int, int]:
+        return (max(1, min(row, self.scroll_bottom)), max(1, min(col, self.cols)))
+
+    def _sel_start(self, row: int, col: int):
+        if row > self.scroll_bottom:          # ignore presses on status/prompt rows
+            return
+        self._sel_lines = self._visible_lines()
+        self._sel_anchor = self._sel_cur = self._clamp_pos(row, col)
+        self._sel_active = True
+        self._sel_moved = False
+
+    def _sel_update(self, row: int, col: int):
+        if not self._sel_active:
+            return
+        pos = self._clamp_pos(row, col)
+        if pos == self._sel_cur:
+            return
+        self._sel_cur = pos
+        if pos != self._sel_anchor:
+            self._sel_moved = True
+        self._paint_selection()
+
+    def _sel_bounds(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        a, b = self._sel_anchor, self._sel_cur
+        return (a, b) if a <= b else (b, a)
+
+    def _paint_selection(self):
+        (sr, sc), (er, ec) = self._sel_bounds()
+        buf = ['\0337']
+        for i, raw in enumerate(self._sel_lines):
+            row = i + 1
+            text = raw[:self.cols]
+            if sr <= row <= er and text:
+                a = sc if row == sr else 1
+                b = ec if row == er else len(text)
+                a, b = max(1, a), min(len(text), b)
+                if a <= b:
+                    text = text[:a - 1] + '\033[7m' + text[a - 1:b] + '\033[0m' + text[b:]
+            buf.append(f'\033[{row};1H\033[2K{text}')
+        buf.append('\0338')
+        self._raw_write(''.join(buf))
+
+    def _selected_text(self) -> str:
+        lines = self._sel_lines
+        if not self._sel_moved:               # plain right click: whole visible console
+            out = [ln.rstrip() for ln in lines]
+        else:
+            (sr, sc), (er, ec) = self._sel_bounds()
+            out = []
+            for row in range(sr, er + 1):
+                text = lines[row - 1] if row - 1 < len(lines) else ''
+                a = sc if row == sr else 1
+                b = ec if row == er else len(text)
+                out.append(text[a - 1:b].rstrip())
+        while out and not out[0]:
+            out.pop(0)
+        while out and not out[-1]:
+            out.pop()
+        return '\n'.join(out)
+
+    def _sel_finish(self):
+        if not self._sel_active:
+            return
+        text = self._selected_text()
+        self._sel_active = False
+        self._sel_moved = False
+        self._sel_lines = []
+        if self.scroll_offset == 0:
+            self.pending_new_logs = 0
+        self._redraw_log_region()             # clears highlight, replays held logs
+        if text:
+            self._copy_to_clipboard(text)
+            n = text.count('\n') + 1
+            self._flash(f"copied {n} line{'s' if n != 1 else ''}")
+        else:
+            self._flash("nothing to copy")
+
+    def _flash(self, text: str, seconds: float = 3.0):
+        self._flash_text = text
+        self._flash_until = time.time() + seconds
+        self._render_status()
+
+    def _copy_to_clipboard(self, text: str):
+        # OSC 52 works over SSH/tmux; the local tools cover terminals without it
+        data = base64.b64encode(text.encode('utf-8')).decode('ascii')
+        self._raw_write(f'\033]52;c;{data}\007')
+        for cmd in (['wl-copy'], ['xclip', '-selection', 'clipboard'],
+                    ['xsel', '--clipboard', '--input'], ['pbcopy']):
+            if not shutil.which(cmd[0]):
+                continue
+            try:
+                r = subprocess.run(
+                    cmd, input=text.encode('utf-8'), timeout=2,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                if r.returncode == 0:
+                    return
+            except (OSError, subprocess.SubprocessError):
+                continue
+
+    # ---------- history ----------
+    def _load_history(self):
+        path = self.history_file
         try:
-            s = seq.decode('ascii', errors='ignore')
-            if not s.startswith('[<') or len(s) < 5:
-                return
-            body = s[2:-1]
-            parts = body.split(';')
-            if len(parts) != 3:
-                return
-            button = int(parts[0])
-            if button == 64:        # scroll up
-                self._handle_scroll('up')
-            elif button == 65:      # scroll down
-                self._handle_scroll('down')
-            # other buttons ignored
-        except Exception:
+            if not os.path.exists(path):
+                with open(path, 'a', encoding='utf-8'):
+                    pass
+            os.chmod(path, 0o600)             # commands may contain tokens/urls
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = [ln.rstrip('\n') for ln in f if ln.strip()]
+            self.history = lines[-self.history_size:]
+            if len(lines) > self.history_size:
+                self._rewrite_history()
+        except OSError:
+            self.history = []
+        self._hist_idx = len(self.history)
+
+    def _rewrite_history(self):
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                f.writelines(ln + '\n' for ln in self.history)
+        except OSError:
             pass
+
+    def _add_history(self, line: str):
+        line = line.strip()
+        if line and (not self.history or self.history[-1] != line):
+            self.history.append(line)
+            try:
+                with open(self.history_file, 'a', encoding='utf-8') as f:
+                    f.write(line + '\n')
+            except OSError:
+                pass
+            if len(self.history) > self.history_size:
+                self.history = self.history[-self.history_size:]
+                self._rewrite_history()
+        self._hist_idx = len(self.history)
+        self._hist_stash = ""
+
+    def _history_prev(self):
+        if not self.history or self._hist_idx == 0:
+            return
+        if self._hist_idx == len(self.history):
+            self._hist_stash = self.input_buffer
+        self._hist_idx -= 1
+        self._set_input(self.history[self._hist_idx])
+
+    def _history_next(self):
+        if self._hist_idx >= len(self.history):
+            return
+        self._hist_idx += 1
+        if self._hist_idx == len(self.history):
+            self._set_input(self._hist_stash)
+        else:
+            self._set_input(self.history[self._hist_idx])
+
+    def _set_input(self, text: str):
+        self.input_buffer = text
+        self.cursor_pos = len(text)
+        self._render_input()
+
+    # ---------- tab completion ----------
+    def _complete(self):
+        if not self.completer:
+            return
+        before = self.input_buffer[:self.cursor_pos]
+        after = self.input_buffer[self.cursor_pos:]
+        try:
+            start, cands = self.completer(before)
+        except Exception:
+            return
+        if not cands:
+            return
+
+        token = before[start:]
+        lowered = [c.lower() for c in cands]
+        common = cands[0][:len(os.path.commonprefix(lowered))]
+
+        if len(cands) == 1:
+            new_token = cands[0]
+            # keep the cursor inside an unclosed-quote token otherwise add a separator
+            if not (new_token.startswith('"') and not new_token.endswith('"')):
+                new_token += ' '
+        elif len(common) > len(token):
+            new_token = common
+        else:
+            self.write_log('  '.join(cands))
+            return
+
+        self.input_buffer = before[:start] + new_token + after
+        self.cursor_pos = start + len(new_token)
+        self._render_input()
 
     def add_guild_log(self, guild_id: int, msg: str):
         self.guild_logs[guild_id].append(msg)
@@ -306,25 +552,36 @@ class ConsoleManager:
                 pass
 
     def _read_escape_seq(self, fd) -> bytes:
-        """Read the remainder of an escape sequence after ESC."""
-        buf = b''
-        deadline = time.time() + 0.05
-        while time.time() < deadline:
+        """Read the remainder of an escape sequence after ESC (one sequence only)."""
+        def nxt() -> bytes:
             try:
-                ready, _, _ = select.select([fd], [], [], 0.005)
-                if not ready:
-                    if buf:
-                        break
-                    continue
-                chunk = os.read(fd, 64)
-                if not chunk:
-                    break
-                buf += chunk
-                last = buf[-1:]
-                if last.isalpha() or last in (b'~', b'\x07'):
-                    break
+                ready, _, _ = select.select([fd], [], [], 0.05)
+                return os.read(fd, 1) if ready else b''
             except Exception:
-                break
+                return b''
+
+        first = nxt()
+        if not first:
+            return b''                        # bare Esc
+        buf = first
+        if first == b'[':                     # CSI: params/intermediates, then a final byte 0x40-0x7e
+            while len(buf) < 64:
+                c = nxt()
+                if not c:
+                    break
+                buf += c
+                if 0x40 <= c[0] <= 0x7e:
+                    break
+        elif first == b'O':                   # SS3 (e.g. ESC O A)
+            buf += nxt()
+        elif first == b']':                   # OSC, terminated by BEL
+            while len(buf) < 256:
+                c = nxt()
+                if not c:
+                    break
+                buf += c
+                if c == b'\x07':
+                    break
         return buf
 
     def _handle_key(self, ch: bytes, fd: int):
@@ -333,6 +590,7 @@ class ConsoleManager:
                 line = self.input_buffer
                 self.input_buffer = ""
                 self.cursor_pos = 0
+                self._add_history(line)
 
                 # Enter always jumps to bottom so the user sees the result
                 if self.scroll_offset > 0:
@@ -385,7 +643,7 @@ class ConsoleManager:
                     self._handle_escape(seq)
 
             elif ch == b'\t':
-                pass
+                self._complete()
 
             else:
                 try:
@@ -402,8 +660,12 @@ class ConsoleManager:
                     self._render_input()
 
     def _handle_escape(self, seq: bytes):
-        if seq in (b'[A', b'OA', b'[B', b'OB'):
-            return   # Up/Down not bound (no history yet)
+        if seq in (b'[A', b'OA'):
+            self._history_prev()
+            return
+        if seq in (b'[B', b'OB'):
+            self._history_next()
+            return
         if seq in (b'[C', b'OC'):
             if self.cursor_pos < len(self.input_buffer):
                 self.cursor_pos += 1
@@ -456,7 +718,7 @@ class ConsoleManager:
         self.running = False
         try:
             if self.mouse_enabled:
-                self._raw_write('\033[?1006l\033[?1000l')
+                self._raw_write('\033[?1006l\033[?1002l\033[?1000l')
                 self.mouse_enabled = False
             self._raw_write('\033[r')                        # reset scroll region
             self._raw_write(f'\033[{self.rows};1H\n')        # park cursor below

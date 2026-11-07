@@ -5,15 +5,24 @@ import importlib
 import sys
 import time
 import traceback
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
 
+from audio import SONG_FILTERS
 from contexts import MockContext
 from guild_state import cleanup_all_downloads, get_guild_state
 from loggers import cli_logger
 import playlists as playlist_mod
+
+# commands whose first argument is a guild reference (tab completion)
+GUILD_ARG_COMMANDS = {
+    'channels', 'voice_channels', 'text_channels', 'members', 'guildinfo',
+    'sendmsg', 'join', 'leave', 'stream', 'queue', 'clear', 'shuffle', 'loop',
+    'pause', 'resume', 'skip', 'stop', 'filter', 'cleanup', 'usage',
+}
+STATUS_TYPES = ('playing', 'watching', 'listening', 'competing', 'clear')
 
 
 class AdminCLI:
@@ -28,6 +37,7 @@ class AdminCLI:
         self.start_time = time.time()
         self.loop = None
         self.command_queue: Optional[asyncio.Queue] = None
+        console.completer = self.complete
 
     # ---------- input ----------
     def safe_input(self, prompt: str) -> str:
@@ -95,11 +105,8 @@ class AdminCLI:
                 self.next_guild_id += 1
 
     # ---------- dispatch ----------
-    async def process_command(self, cmd_line: str):
-        parts = cmd_line.split(maxsplit=1)
-        cmd = parts[0].lower()
-        args = parts[1] if len(parts) > 1 else ""
-        handlers = {
+    def _handlers(self) -> Dict[str, Callable]:
+        return {
             'help':           self.cmd_help,
             'servers':        self.cmd_servers,
             'guilds':         self.cmd_servers,
@@ -136,18 +143,86 @@ class AdminCLI:
             'exit':           self.cmd_exit,
             'quit':           self.cmd_exit,
         }
+
+    async def process_command(self, cmd_line: str):
+        parts = cmd_line.split(maxsplit=1)
+        cmd = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
+        handlers = self._handlers()
         if cmd in handlers:
             await handlers[cmd](args)
         else:
             print(f"Unknown command: {cmd}. Type 'help' for the command list.")
 
     # ---------- helpers ----------
-    def _get_guild(self, bot_id: str) -> Optional[discord.Guild]:
-        try:
-            gid = self.guild_ids.get(int(bot_id))
-            return self.bot.get_guild(gid) if gid else None
-        except Exception:
+    @staticmethod
+    def _unquote(s: str) -> str:
+        s = s.strip()
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in '"\'':
+            return s[1:-1].strip()
+        return s
+
+    def _guild_index(self, guild_id: int) -> Optional[int]:
+        return next((k for k, v in self.guild_ids.items() if v == guild_id), None)
+
+    def _get_guild(self, ref: str) -> Optional[discord.Guild]:
+        """Resolve a guild by bot index, real id, or name (exact, then unique prefix)."""
+        ref = self._unquote(ref or "")
+        if not ref:
             return None
+        self._refresh_guild_ids()
+
+        if ref.isdigit():
+            n = int(ref)
+            gid = self.guild_ids.get(n)
+            guild = self.bot.get_guild(gid) if gid else None
+            guild = guild or self.bot.get_guild(n)
+            if guild:
+                return guild
+
+        needle = ref.casefold()
+        guilds = list(self.bot.guilds)
+        for label, test in (
+            ("name", lambda n: n == needle),
+            ("prefix", lambda n: n.startswith(needle)),
+        ):
+            hits = [g for g in guilds if test(g.name.casefold())]
+            if len(hits) == 1:
+                return hits[0]
+            if len(hits) > 1:
+                opts = ", ".join(f"{self._guild_index(g.id)}={g.name!r}" for g in hits[:6])
+                print(f"Ambiguous guild {label} '{ref}': {opts}. Use the bot id or real id.")
+                return None
+        return None
+
+    def _split_guild(self, args: str) -> Tuple[Optional[discord.Guild], str]:
+        """Peel a leading guild reference off args; returns (guild, remaining text)."""
+        s = args.strip()
+        if not s:
+            return None, ""
+        if s[0] in '"\'':
+            end = s.find(s[0], 1)
+            if end != -1:
+                return self._get_guild(s[1:end]), s[end + 1:].strip()
+            return None, s
+
+        words = s.split()
+        # unquoted multi-word names: longest exact name match wins
+        names = {g.name.casefold(): g for g in self.bot.guilds}
+        if len({g.name.casefold() for g in self.bot.guilds}) == len(self.bot.guilds):
+            for n in range(len(words), 1, -1):
+                guild = names.get(" ".join(words[:n]).casefold())
+                if guild:
+                    return guild, " ".join(words[n:])
+        return self._get_guild(words[0]), " ".join(words[1:])
+
+    async def _guild_call(self, cmd_name: str, args: str):
+        guild = self._get_guild(args)
+        if not guild:
+            print(f"Unknown guild '{args.strip()}'. Use 'servers' to list them."
+                  if args.strip() else f"Usage: {cmd_name} <guild>")
+            return
+        await self._call(cmd_name, guild)
 
     def _get_channel(self, guild, bot_id):
         try:
@@ -155,6 +230,86 @@ class AdminCLI:
             return guild.get_channel(cid) if cid else None
         except Exception:
             return None
+
+    # ---------- tab completion ----------
+    @staticmethod
+    def _tokenize_partial(line: str) -> Tuple[List[str], int, str]:
+        """Split on unquoted whitespace -> (finished tokens, start of current token, current token)."""
+        tokens: List[str] = []
+        start = None
+        quote = None
+        for i, ch in enumerate(line):
+            if start is None:
+                if ch.isspace():
+                    continue
+                start = i
+                quote = ch if ch in '"\'' else None
+            elif quote:
+                if ch == quote:
+                    quote = None
+            elif ch.isspace():
+                tokens.append(line[start:i])
+                start = None
+            elif ch in '"\'':
+                quote = ch
+        if start is None:
+            return tokens, len(line), ""
+        return tokens, start, line[start:]
+
+    @staticmethod
+    def _quote_name(name: str) -> str:
+        if any(c.isspace() for c in name) or '"' in name or "'" in name:
+            q = "'" if '"' in name and "'" not in name else '"'
+            return f"{q}{name}{q}"
+        return name
+
+    def _guild_candidates(self, cur: str) -> List[str]:
+        raw = cur.lstrip('"\'')
+        needle = raw.casefold()
+        out: List[str] = []
+        for g in list(self.bot.guilds):
+            if raw.isdigit():
+                idx = self._guild_index(g.id)
+                for val in (str(idx) if idx else "", str(g.id)):
+                    if val and val.startswith(raw):
+                        out.append(val)
+            elif g.name.casefold().startswith(needle):
+                out.append(self._quote_name(g.name))
+        return sorted(dict.fromkeys(out), key=lambda s: s.strip('"\'').casefold())
+
+    def complete(self, line: str) -> Tuple[int, List[str]]:
+        """Console tab-completion hook: (token start index, candidates)."""
+        try:
+            self._refresh_guild_ids()
+            tokens, start, cur = self._tokenize_partial(line)
+            low = cur.casefold()
+
+            def pick(options) -> List[str]:
+                return [o for o in options if o.casefold().startswith(low)]
+
+            if not tokens:
+                return start, pick(sorted(self._handlers()))
+
+            cmd = tokens[0].lower()
+            pos = len(tokens)                       # 1 = first argument
+            prev = [self._unquote(t).lower() for t in tokens[1:]]
+
+            if cmd == 'guildlog':
+                if pos == 1:
+                    return start, pick(['off', 'clear']) + self._guild_candidates(cur)
+                if pos == 2:
+                    if prev[0] == 'clear':
+                        return start, self._guild_candidates(cur)
+                    return start, pick(['follow'])
+            elif cmd == 'status' and pos == 1:
+                return start, pick(STATUS_TYPES)
+            elif cmd == 'filter' and pos == 2:
+                return start, pick(sorted(SONG_FILTERS))
+            elif cmd in GUILD_ARG_COMMANDS and pos == 1:
+                return start, self._guild_candidates(cur)
+        except Exception:
+            pass
+        return len(line), []
 
     async def _call(self, cmd_name, guild, **kwargs):
         ctx = MockContext(guild)
@@ -165,6 +320,12 @@ class AdminCLI:
         print(
             "\n"
             "Folda Tunez CLI commands:\n"
+            "\n"
+            "<guild> = bot id, real guild id, or name (name prefix works; quote names\n"
+            "          with spaces, e.g. \"My Server\"). Press Tab to complete.\n"
+            "Keys: Up/Down = command history, Tab = complete, PgUp/PgDn/wheel = scroll.\n"
+            "Mouse: hold right button + drag to copy text; right click = copy screen.\n"
+            "       (Shift+drag uses the terminal's own selection.)\n"
             "\n"
             "Introspection:\n"
             "  servers / guilds                 - list all guilds (bot id, real id, status)\n"
@@ -314,15 +475,15 @@ class AdminCLI:
 
     # ---------- messaging ----------
     async def cmd_sendmsg(self, args):
-        parts = args.split(maxsplit=2)
-        if len(parts) < 3:
+        guild, rest = self._split_guild(args)
+        parts = rest.split(maxsplit=1)
+        if not guild or len(parts) < 2:
             print("Usage: sendmsg <guild> <channel> <message>"); return
-        guild = self._get_guild(parts[0])
-        ch = self._get_channel(guild, parts[1]) if guild else None
-        if not guild or not isinstance(ch, discord.TextChannel):
+        ch = self._get_channel(guild, parts[0])
+        if not isinstance(ch, discord.TextChannel):
             print("Invalid guild or channel"); return
         try:
-            await ch.send(parts[2])
+            await ch.send(parts[1])
             print("Sent")
         except Exception as e:
             print(f"Failed: {e}")
@@ -343,12 +504,12 @@ class AdminCLI:
 
     # ---------- voice / playback ----------
     async def cmd_join(self, args):
-        parts = args.split()
-        if len(parts) < 2:
+        guild, rest = self._split_guild(args)
+        parts = rest.split()
+        if not guild or not parts:
             print("Usage: join <guild> <channel>"); return
-        guild = self._get_guild(parts[0])
-        ch = self._get_channel(guild, parts[1]) if guild else None
-        if not guild or not isinstance(ch, discord.VoiceChannel):
+        ch = self._get_channel(guild, parts[0])
+        if not isinstance(ch, discord.VoiceChannel):
             print("Invalid guild or voice channel"); return
         try:
             if guild.voice_client:
@@ -360,58 +521,44 @@ class AdminCLI:
             print(f"Failed: {e}")
 
     async def cmd_leave(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('leave', g)
+        await self._guild_call('leave', args)
 
     async def cmd_stream(self, args):
-        parts = args.split(maxsplit=1)
-        if len(parts) < 2:
+        guild, url = self._split_guild(args)
+        if not guild or not url:
             print("Usage: stream <guild> <url>"); return
-        guild = self._get_guild(parts[0])
-        if not guild:
-            print("Invalid guild"); return
-        await self._call('stream', guild, query=parts[1])
+        await self._call('stream', guild, query=url)
 
     async def cmd_queue(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('queue', g)
+        await self._guild_call('queue', args)
 
     async def cmd_clear(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('clear', g)
+        await self._guild_call('clear', args)
 
     async def cmd_shuffle(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('shuffle', g)
+        await self._guild_call('shuffle', args)
 
     async def cmd_loop(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('loop', g)
+        await self._guild_call('loop', args)
 
     async def cmd_pause(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('pause', g)
+        await self._guild_call('pause', args)
 
     async def cmd_resume(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('resume', g)
+        await self._guild_call('resume', args)
 
     async def cmd_skip(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('skip', g)
+        await self._guild_call('skip', args)
 
     async def cmd_stop(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('stop', g)
+        await self._guild_call('stop', args)
 
     async def cmd_filter(self, args):
-        parts = args.split(maxsplit=1)
-        if not parts:
+        if not args.strip():
             print("Usage: filter <guild> [name]"); return
-        g = self._get_guild(parts[0])
+        g, name = self._split_guild(args)
         if not g:
             print("Invalid guild"); return
-        name = parts[1] if len(parts) > 1 else ""
         await self._call('filter', g, name=name)
 
     # ---------- bot control ----------
@@ -467,8 +614,7 @@ class AdminCLI:
         print(f"Cleaned {n} files")
 
     async def cmd_usage(self, args):
-        g = self._get_guild(args)
-        if g: await self._call('usage', g)
+        await self._guild_call('usage', args)
 
     async def cmd_playlists(self, args):
         names = playlist_mod.list_playlists()
@@ -482,11 +628,12 @@ class AdminCLI:
 
     # ---------- debug ----------
     async def cmd_guildlog(self, args):
-        parts = args.split()
-        if not parts:
+        args = args.strip()
+        if not args:
             self._print_guildlog_help(); return
 
-        sub = parts[0].lower()
+        sub = args.split()[0].lower()
+        rest_after_sub = args[len(sub):].strip()
         if sub == 'off':
             self.console.guild_filter = None
             self.console.update_status()
@@ -494,24 +641,24 @@ class AdminCLI:
             return
 
         if sub == 'clear':
-            if len(parts) > 1:
-                g = self._get_guild(parts[1])
+            if rest_after_sub:
+                g = self._get_guild(rest_after_sub)
                 if g:
                     self.console.guild_logs[g.id].clear()
-                    print(f"Cleared log buffer for guild {parts[1]}")
+                    print(f"Cleared log buffer for guild {g.name}")
                 else:
-                    print("Invalid guild ID")
+                    print("Invalid guild")
             else:
                 for buf in self.console.guild_logs.values():
                     buf.clear()
                 print("Cleared all guild log buffers.")
             return
 
-        g = self._get_guild(parts[0])
+        g, rest = self._split_guild(args)
         if not g:
-            print("Invalid guild ID"); return
+            print("Invalid guild"); return
 
-        if len(parts) > 1 and parts[1].lower() == 'follow':
+        if rest.lower() == 'follow':
             self.console.guild_filter = g.id
             self.console.update_status()
             print(f"Following logs for guild {g.name} (id={g.id}). 'guildlog off' to stop.")
