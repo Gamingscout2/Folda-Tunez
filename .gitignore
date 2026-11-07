@@ -1,0 +1,23 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Other python environment tools (pipenv, poetry, conda, etc.)
+.spyderproject
+.ropeproject
+/pip-selfcheck.json
+.pdm-plugins/
+.pdm-build/
+__pypackages__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Environment files (holding secrets/tokens)
+.env
+.env.local
+.env.*.local
