@@ -1,4 +1,5 @@
 """FFmpeg audio source with data-usage tracking, plus available filters."""
+
 from typing import Dict, Optional
 
 import discord
@@ -19,14 +20,31 @@ SONG_FILTERS: Dict[str, Optional[str]] = {
 }
 
 
-class TrackedFFmpegPCMAudio(discord.FFmpegPCMAudio):
+class TrackedFFmpegPCMAudio(discord.FFmpegOpusAudio):
+    """Opus-encoded FFmpeg source with per-guild byte tracking.
+
+    Inherits from FFmpegOpusAudio (not FFmpegPCMAudio) so ffmpeg encodes
+    audio in the format Discord's voice channel actually uses. This avoids
+    the "ffmpeg process has not terminated" warning on skip/stop and cuts
+    CPU/memory usage per stream.
+
+    The class name is kept identical to the previous PCM version so no
+    changes are needed in music.py or guild_state.py.
+    """
+
     def __init__(self, source, guild_id, filter_name: Optional[str] = None, **kwargs):
         options = "-loglevel warning -analyzeduration 0 -bufsize 2048k"
         if filter_name and filter_name in SONG_FILTERS:
             fs = SONG_FILTERS[filter_name]
             if fs:
                 options += f' -af "{fs}"'
-        super().__init__(source, executable=FFMPEG_PATH, options=options, **kwargs)
+        super().__init__(
+            source,
+            executable=FFMPEG_PATH,
+            options=options,
+            bitrate=192,
+            **kwargs,
+        )
         self.guild_id = guild_id
 
     def read(self):
