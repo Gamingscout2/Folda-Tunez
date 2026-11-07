@@ -1,6 +1,7 @@
 """Hyperthreaded audio downloader and YouTube search helper."""
 import asyncio
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +34,11 @@ class Downloader:
             'noplaylist': True,
             'logger': yt_logger,
         }
+        # the embedded API ignores ~/.config/yt-dlp/config, so pass these explicitly
+        deno = shutil.which('deno') or os.path.expanduser('~/.deno/bin/deno')
+        if os.path.isfile(deno):
+            self.ydl_opts_base['js_runtimes'] = {'deno': {'path': deno}}
+            self.ydl_opts_base['remote_components'] = ['ejs:github']
 
     async def extract_info(self, url: str, download: bool = False, process: bool = True) -> dict:
         opts = self.ydl_opts_base.copy()

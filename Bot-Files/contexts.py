@@ -7,7 +7,6 @@ import discord
 class MockContext:
     def __init__(self, guild: discord.Guild, channel: Optional[discord.TextChannel] = None):
         self.guild = guild
-        self.voice_client = guild.voice_client
         self.author = type('MockAuthor', (), {
             'display_name': 'CLI Admin',
             'id': 0,
@@ -22,6 +21,11 @@ class MockContext:
             'guild': guild, 'author': self.author,
             'channel': channel, 'content': '', 'role_mentions': []
         })()
+
+    @property
+    def voice_client(self) -> Optional[discord.VoiceClient]:
+        # live lookup - a snapshot goes stale once the bot joins after ctx creation
+        return self.guild.voice_client
 
     async def send(self, content, **kwargs):
         if self.channel:
@@ -40,9 +44,13 @@ class InteractionContext:
         self.interaction = interaction
         self.guild = interaction.guild
         self.author = interaction.user
-        self.voice_client = interaction.guild.voice_client if interaction.guild else None
         self.channel = interaction.channel
         self.message = None
+
+    @property
+    def voice_client(self) -> Optional[discord.VoiceClient]:
+        # live lookup - /play connects after this ctx is built
+        return self.guild.voice_client if self.guild else None
 
     async def send(self, content, **kwargs):
         return await self.interaction.followup.send(content, **kwargs)

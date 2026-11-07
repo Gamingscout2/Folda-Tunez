@@ -114,7 +114,23 @@ class GuildState:
             self.playback_active = True
 
             # Ensure voice
-            if not ctx.voice_client or not ctx.voice_client.is_connected():
+            vc = ctx.guild.voice_client
+            if vc and not vc.is_connected():
+                # give an in-flight library reconnect a few seconds before
+                # tearing it down, otherwise channel.connect() raises "Already connected"
+                for _ in range(10):
+                    await asyncio.sleep(1)
+                    if vc.is_connected():
+                        break
+                else:
+                    bot_logger.warning(
+                        f"Voice client in guild {self.guild_id} stuck disconnected, resetting"
+                    )
+                    try:
+                        await vc.disconnect(force=True)
+                    except Exception as e:
+                        bot_logger.error(f"Voice client reset failed: {e}")
+            if not ctx.guild.voice_client or not ctx.guild.voice_client.is_connected():
                 channel = None
                 if hasattr(ctx.author, 'voice') and ctx.author.voice:
                     channel = ctx.author.voice.channel
@@ -214,7 +230,11 @@ class GuildState:
                 asyncio.run_coroutine_threadsafe(self._play_next_safe(ctx), loop)
 
             try:
-                ctx.voice_client.play(source, after=after_playback)
+                ctx.guild.voice_client.play(source, after=after_playback)
+                bot_logger.info(
+                    f"Playing '{song['title']}' in guild {self.guild_id} "
+                    f"(filter={self.audio_filter}, ffmpeg src={os.path.basename(song['url'])})"
+                )
                 await self._safe_send(ctx, f"Now Playing: **{song['title']}**")
             except discord.ClientException as e:
                 if "Already playing audio" in str(e):

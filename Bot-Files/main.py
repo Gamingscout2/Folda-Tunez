@@ -1,7 +1,10 @@
 """Bot entry point, events, and slash-command registration."""
 
 import asyncio
+import ctypes.util
+import importlib
 import logging
+import shutil
 import subprocess
 
 import discord
@@ -26,14 +29,16 @@ def _load_opus() -> bool:
         return True
 
     candidates = [
+        ctypes.util.find_library("opus"),
         "libopus.so.0",
         "libopus.so",
         "/lib64/libopus.so.0",
         "/usr/lib/x86_64-linux-gnu/libopus.so.0",
+        "/usr/lib/aarch64-linux-gnu/libopus.so.0",
         "/usr/lib/libopus.so.0",
         "/usr/local/lib/libopus.so.0",
     ]
-    for path in candidates:
+    for path in filter(None, candidates):
         try:
             discord.opus.load_opus(path)
             if discord.opus.is_loaded():
@@ -47,6 +52,44 @@ def _load_opus() -> bool:
         "Install libopus0 and verify with: ldconfig -p | grep opus"
     )
     return False
+
+
+def _check_voice_stack() -> bool:
+    """Log a clear error for each missing piece of the voice pipeline.
+
+    Discord now requires DAVE (E2EE) on voice connections; without the
+    'davey' package the bot joins the channel but no audio ever arrives.
+    """
+    ok = True
+    for mod, pkg in (("nacl", "PyNaCl"), ("davey", "davey")):
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            ok = False
+            bot_logger.critical(
+                f"Python package '{pkg}' is missing - voice will connect but stay silent. "
+                f"Fix: pip install -U 'discord.py[voice]' (inside the venv)"
+            )
+
+    ffmpeg_path = shutil.which(FFMPEG_PATH) or FFMPEG_PATH
+    try:
+        out = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=15, check=True,
+        ).stdout
+        if "libopus" not in out:
+            ok = False
+            bot_logger.critical(
+                f"ffmpeg at '{ffmpeg_path}' has no libopus encoder - playback will be silent. "
+                "Install a full ffmpeg build."
+            )
+    except (OSError, subprocess.SubprocessError) as e:
+        ok = False
+        bot_logger.critical(f"Could not run ffmpeg at '{ffmpeg_path}': {e}")
+
+    if ok:
+        bot_logger.info(f"Voice stack OK (discord.py {discord.__version__}, ffmpeg libopus present)")
+    return ok
 
 
 # ==================== Console ====================
@@ -214,6 +257,7 @@ async def on_close():
 
 if __name__ == "__main__":
     _load_opus()
+    _check_voice_stack()
     try:
         bot.run(TOKEN)
     except KeyboardInterrupt:
