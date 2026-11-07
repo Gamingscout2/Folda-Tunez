@@ -12,6 +12,4 @@ last_join_channels: Dict[int, discord.VoiceChannel] = {}
 guild_dj_roles:     Dict[int, int] = {}
 vote_skips:         Dict[int, Set[int]] = defaultdict(set)
 stay_247:           Dict[int, bool] = defaultdict(bool)
-
-# Every auto-downloaded file in existence, for shutdown cleanup
 ALL_DOWNLOADED_FILES: Set[str] = set()

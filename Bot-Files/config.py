@@ -1,7 +1,7 @@
 """Configuration constants and environment bootstrap."""
 import os
 from dotenv import load_dotenv
- 
+
 load_dotenv()
 
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
@@ -19,8 +19,9 @@ DOWNLOAD_TIMEOUT    = int(os.getenv('DOWNLOAD_TIMEOUT', '300'))
 VOICE_TIMEOUT       = int(os.getenv('VOICE_TIMEOUT', '60'))
 MAX_PLAYLIST_ITEMS  = int(os.getenv('MAX_PLAYLIST_ITEMS', '200'))
 DOWNLOADS_DIR       = os.getenv('DOWNLOADS_DIR', 'downloads')
-PLAYLISTS_FILE      = os.getenv('PLAYLISTS_FILE', 'playlists.json')
+PLAYLISTS_DIR       = os.getenv('PLAYLISTS_DIR', 'playlists')
 
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+os.makedirs(PLAYLISTS_DIR, exist_ok=True)
 
 SUPPORTED_AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.mp4', '.wav', '.flac', '.ogg', '.aac', '.webm'}

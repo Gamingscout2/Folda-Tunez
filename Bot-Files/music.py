@@ -1,7 +1,7 @@
-"""The Music cog: all user-facing playback commands."""
+"""The Music cog: playback, queue, playlists, filters."""
+
 import asyncio
 import os
-import random
 import time
 import traceback
 from typing import List
@@ -9,14 +9,14 @@ from typing import List
 import discord
 from discord.ext import commands
 
+import playlists as playlist_mod
 from audio import SONG_FILTERS
 from config import BOT_PREFIX, MAX_PLAYLIST_ITEMS
 from downloader import downloader, search_youtube
-from guild_state import cleanup_all_downloads, get_guild_state, rebuild_queue
+from guild_state import cleanup_all_downloads, get_guild_state
 from helpers import is_admin, is_dj
 from loggers import bot_logger
-from persistence import load_playlists, save_playlists
-from runtime import DATA_USAGE, guild_dj_roles, stay_247, vote_skips
+from runtime import DATA_USAGE, guild_dj_roles, last_join_channels, stay_247, vote_skips
 from search_view import SearchView
 
 
@@ -25,7 +25,7 @@ class Music(commands.Cog):
         self.bot = bot
 
     # ---------- helpers ----------
-    async def ensure_voice(self, ctx: commands.Context) -> bool:
+    async def ensure_voice(self, ctx) -> bool:
         if ctx.voice_client and ctx.voice_client.is_connected():
             return True
         if not getattr(ctx.author, 'voice', None) or not ctx.author.voice:
@@ -34,7 +34,6 @@ class Music(commands.Cog):
         channel = ctx.author.voice.channel
         try:
             await channel.connect(timeout=60, reconnect=True)
-            from runtime import last_join_channels
             last_join_channels[ctx.guild.id] = channel
             return True
         except Exception as e:
@@ -42,21 +41,21 @@ class Music(commands.Cog):
             await ctx.send("Failed to connect to voice channel")
             return False
 
-    async def _check_dj(self, ctx: commands.Context) -> bool:
+    async def _check_dj(self, ctx) -> bool:
         if is_dj(ctx, ctx.guild.id):
             return True
         await ctx.send("You need the DJ role or `Manage Server` permission.")
         return False
 
-    # ---------- playback entry points ----------
+    # ---------- playback ----------
     @commands.command(name='join', aliases=['getinherelittleboy'])
-    async def join(self, ctx: commands.Context):
+    async def join(self, ctx):
         if not await self.ensure_voice(ctx):
             return
         await ctx.send(f"Joined **{ctx.author.voice.channel.name}**")
 
     @commands.command(name='leave')
-    async def leave(self, ctx: commands.Context):
+    async def leave(self, ctx):
         if not await self._check_dj(ctx):
             return
         state = get_guild_state(ctx.guild.id)
@@ -64,37 +63,31 @@ class Music(commands.Cog):
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
         deleted = await state.cleanup_downloads()
-        async with state.lock:
-            state.queue = asyncio.Queue()
-            state.queue_list.clear()
-            state.current_song = None
-            state.loop_type = None
-            state.history.clear()
-            state.is_playing = False
-            state.playback_active = False
+        state.queue_list.clear()
+        state.current_index = -1
+        state.current_song = None
+        state.loop_type = None
+        state.is_playing = False
+        state.playback_active = False
         await ctx.send(f"Left voice and cleared queue (deleted **{deleted}** files)")
 
     @commands.command(name='stream', aliases=['play', 'p'])
-    async def stream(self, ctx: commands.Context, *, query: str = ""):
+    async def stream(self, ctx, *, query: str = ""):
         if not query:
             await ctx.send("Usage: `!stream <url or search>`")
             return
         if not await self.ensure_voice(ctx):
             return
-        state = get_guild_state(ctx.guild.id)
-
         if query.startswith(('http://', 'https://')):
             if 'list=' in query or 'playlist' in query:
                 await self._handle_playlist(ctx, query)
             else:
                 await self._handle_single_url(ctx, query)
             return
-
         entries = await search_youtube(query, limit=5)
         if not entries:
             await ctx.send("No results found.")
             return
-
         view = SearchView(entries, ctx)
         lines = [f"**Search results for '{query}':**"]
         for idx, entry in enumerate(entries, 1):
@@ -105,18 +98,16 @@ class Music(commands.Cog):
         msg = await ctx.send("\n".join(lines), view=view)
         view.message = msg
         await view.wait()
-
         if view.selected_entry is None:
             try:
                 await msg.edit(content="Selection cancelled.", view=None)
             except Exception:
                 pass
             return
-
         url = view.selected_entry.get('webpage_url') or f"https://youtu.be/{view.selected_entry['id']}"
         await self._handle_single_url(ctx, url)
 
-    async def _handle_single_url(self, ctx: commands.Context, url: str):
+    async def _handle_single_url(self, ctx, url: str):
         state = get_guild_state(ctx.guild.id)
         msg = await ctx.send("Downloading...")
         song = await downloader.download_single(url)
@@ -125,14 +116,12 @@ class Music(commands.Cog):
             return
         song['requester'] = ctx.author.display_name
         state.downloaded_files.add(song['url'])
-        async with state.lock:
-            await state.queue.put(song)
-            state.queue_list.append(song)
+        await state.add_song(song)
         await msg.edit(content=f"Added: **{song['title']}**")
         if not state.is_playing:
             await state.start_playback_loop(ctx)
 
-    async def _handle_playlist(self, ctx: commands.Context, url: str):
+    async def _handle_playlist(self, ctx, url: str):
         state = get_guild_state(ctx.guild.id)
         status = await ctx.send("Analyzing playlist...")
         try:
@@ -144,7 +133,6 @@ class Music(commands.Cog):
             total = len(entries)
             title = info.get('title', 'Playlist')
             await status.edit(content=f"Downloading **{total}** tracks from **{title}**...")
-
             progress_msg = await ctx.send(f"Progress: 0/{total}")
             completed = 0
 
@@ -159,18 +147,12 @@ class Music(commands.Cog):
             downloaded = await downloader.download_playlist_batch(
                 entries, ctx.author.display_name, progress_callback=progress_cb, state=state
             )
-            async with state.lock:
-                for song in downloaded:
-                    await state.queue.put(song)
-                    state.queue_list.append(song)
-
+            for song in downloaded:
+                await state.add_song(song)
             if downloaded:
-                await progress_msg.edit(
-                    content=f"Added **{len(downloaded)}** tracks from **{title}**"
-                )
+                await progress_msg.edit(content=f"Added **{len(downloaded)}** tracks from **{title}**")
             else:
                 await progress_msg.edit(content="Failed to download any tracks")
-
             if not state.is_playing and downloaded:
                 await state.start_playback_loop(ctx)
         except Exception:
@@ -178,7 +160,7 @@ class Music(commands.Cog):
             await ctx.send("Failed to process playlist")
 
     @commands.command(name='playnext', aliases=['pn'])
-    async def playnext(self, ctx: commands.Context, *, args: str = ""):
+    async def playnext(self, ctx, *, args: str = ""):
         """!playnext <queue_num|url|local_file>"""
         if not args:
             await ctx.send("Usage: `!playnext <queue_number|url|local_file>`")
@@ -190,16 +172,18 @@ class Music(commands.Cog):
 
         if args.isdigit():
             idx = int(args)
-            async with state.lock:
-                if idx < 1 or idx > len(state.queue_list):
-                    await ctx.send(f"Queue only has {len(state.queue_list)} songs.")
-                    return
-                song = state.queue_list.pop(idx - 1)
-                song.pop('removed', None)
-                state.queue_list.insert(0, song)
-                rebuild_queue(state)
-            await ctx.send(f"Moved **{song['title']}** to next.")
-
+            if not (1 <= idx <= len(state.queue_list)):
+                await ctx.send(f"Queue only has {len(state.queue_list)} songs.")
+                return
+            src = idx - 1
+            target = state.current_index + 1 if state.current_index >= 0 else 0
+            target = min(target, len(state.queue_list) - 1)
+            if src == target:
+                await ctx.send(f"**{state.queue_list[src]['title']}** is already next.")
+                return
+            song = await state.move(src, target)
+            if song:
+                await ctx.send(f"Moved **{song['title']}** to next in queue.")
         elif args.startswith(('http://', 'https://')):
             msg = await ctx.send("Downloading...")
             song = await downloader.download_single(args)
@@ -208,11 +192,8 @@ class Music(commands.Cog):
                 return
             song['requester'] = ctx.author.display_name
             state.downloaded_files.add(song['url'])
-            async with state.lock:
-                state.queue_list.insert(0, song)
-                state.queue._queue.appendleft(song)
+            await state.insert_next(song)
             await msg.edit(content=f"Added next: **{song['title']}**")
-
         else:
             if not os.path.exists(args):
                 await ctx.send(f"File not found: `{args}`")
@@ -224,51 +205,55 @@ class Music(commands.Cog):
                 'duration': 0,
                 'source': 'local',
             }
-            async with state.lock:
-                state.queue_list.insert(0, song)
-                state.queue._queue.appendleft(song)
+            await state.insert_next(song)
             await ctx.send(f"Added next: **{song['title']}**")
-
         if not state.is_playing:
             await state.start_playback_loop(ctx)
 
+    # ---------- queue display ----------
     @commands.command(name='queue', aliases=['q'])
-    async def queue_cmd(self, ctx: commands.Context):
+    async def queue_cmd(self, ctx):
         state = get_guild_state(ctx.guild.id)
-        if not state.current_song and not state.queue_list:
+        if not state.queue_list:
             await ctx.send("Queue is empty")
             return
 
+        header = "**Queue:**"
+        if state.loop_type:
+            header += f" (loop: {state.loop_type})"
+        if state.audio_filter:
+            header += f" (filter: {state.audio_filter})"
+
         chunks: List[str] = []
-        current: List[str] = []
+        current: List[str] = [header]
 
-        if state.current_song:
-            elapsed = int(time.time() - state.start_time)
-            dur = int(state.current_song.get('duration') or 0)
-            e_str = f"{elapsed//60}:{elapsed%60:02d}"
-            d_str = f"{dur//60}:{dur%60:02d}" if dur else "??:??"
-            current.append(f"**Now Playing:** {state.current_song['title']}")
-            current.append(f"`{e_str}/{d_str}` | {state.current_song.get('requester', '?')}")
-
-        if state.queue_list:
-            current.append("\n**Upcoming:**" if current else "**Upcoming:**")
-            for idx, song in enumerate(state.queue_list, 1):
-                dur = int(song.get('duration') or 0)
-                d_str = f"{dur//60}:{dur%60:02d}" if dur else "??:??"
-                line = f"`{idx}.` {song['title']} ({d_str}) | {song.get('requester', '?')}"
-                if len('\n'.join(current + [line])) > 1900:
-                    chunks.append('\n'.join(current))
-                    current = ["**Upcoming (cont'd):**", line]
+        for i, song in enumerate(state.queue_list):
+            num = i + 1
+            dur = int(song.get('duration') or 0)
+            d_str = f"{dur//60}:{dur%60:02d}" if dur else "?:??"
+            requester = song.get('requester', '?')
+            title = song['title']
+            if i == state.current_index:
+                if state.is_playing:
+                    line = f"> **{num}. {title} ({d_str})** | {requester}"
                 else:
-                    current.append(line)
+                    line = f"> {num}. {title} ({d_str}) | {requester}"
+            else:
+                line = f"  {num}. {title} ({d_str}) | {requester}"
 
-        if current:
+            if len('\n'.join(current + [line])) > 1900:
+                chunks.append('\n'.join(current))
+                current = ["**Queue (cont'd):**", line]
+            else:
+                current.append(line)
+
+        if len(current) > 1:
             chunks.append('\n'.join(current))
         for c in chunks:
             await ctx.send(c)
 
     @commands.command(name='np', aliases=['nowplaying'])
-    async def np_cmd(self, ctx: commands.Context):
+    async def np_cmd(self, ctx):
         state = get_guild_state(ctx.guild.id)
         if not state.current_song:
             await ctx.send("Nothing is playing")
@@ -278,119 +263,108 @@ class Music(commands.Cog):
         dur = int(song.get('duration') or 0)
         e_str = f"{elapsed//60}:{elapsed%60:02d}"
         d_str = f"{dur//60}:{dur%60:02d}" if dur else "??:??"
-        loop = {'song': '', 'queue': '', None: ''}[state.loop_type]
-        filt = f" | `{state.audio_filter}`" if state.audio_filter else ""
+        loop = {'song': ' | loop: song', 'queue': ' | loop: queue', None: ''}[state.loop_type]
+        filt = f" | filter: {state.audio_filter}" if state.audio_filter else ""
         await ctx.send(
-            f"**{song['title']}**\n"
-            f"`{e_str} / {d_str}` | {song.get('requester', '?')} {loop}{filt}"
+            f"**{song['title']}**\n`{e_str} / {d_str}` | {song.get('requester', '?')}{loop}{filt}"
         )
 
+    # ---------- queue ops ----------
     @commands.command(name='remove', aliases=['rm'])
-    async def remove_cmd(self, ctx: commands.Context, index: int):
+    async def remove_cmd(self, ctx, index: int):
         if not await self._check_dj(ctx):
             return
         state = get_guild_state(ctx.guild.id)
-        async with state.lock:
-            if index < 1 or index > len(state.queue_list):
-                await ctx.send(f"Invalid index. Queue has {len(state.queue_list)} songs.")
-                return
-            removed = state.queue_list.pop(index - 1)
-            removed['removed'] = True
-            rebuild_queue(state)
-        await ctx.send(f"Removed: **{removed['title']}**")
+        if not (1 <= index <= len(state.queue_list)):
+            await ctx.send(f"Invalid index. Queue has {len(state.queue_list)} songs.")
+            return
+        removed = await state.remove_at(ctx, index - 1)
+        if removed:
+            await ctx.send(f"Removed: **{removed['title']}**")
 
     @commands.command(name='move')
-    async def move_cmd(self, ctx: commands.Context, src: int, dst: int):
+    async def move_cmd(self, ctx, src: int, dst: int):
         if not await self._check_dj(ctx):
             return
         state = get_guild_state(ctx.guild.id)
-        async with state.lock:
-            n = len(state.queue_list)
-            if not (1 <= src <= n and 1 <= dst <= n):
-                await ctx.send(f"Indices must be between 1 and {n}")
-                return
-            song = state.queue_list.pop(src - 1)
-            state.queue_list.insert(dst - 1, song)
-            rebuild_queue(state)
-        await ctx.send(f"Moved **{song['title']}** to position {dst}")
+        n = len(state.queue_list)
+        if not (1 <= src <= n and 1 <= dst <= n):
+            await ctx.send(f"Indices must be between 1 and {n}")
+            return
+        song = await state.move(src - 1, dst - 1)
+        if song:
+            await ctx.send(f"Moved **{song['title']}** to position {dst}")
 
     @commands.command(name='jump', aliases=['skipto'])
-    async def jump_cmd(self, ctx: commands.Context, index: int):
+    async def jump_cmd(self, ctx, index: int):
         if not await self._check_dj(ctx):
             return
         state = get_guild_state(ctx.guild.id)
-        async with state.lock:
-            if index < 1 or index > len(state.queue_list):
-                await ctx.send(f"Invalid index. Queue has {len(state.queue_list)} songs.")
-                return
-            if index > 1:
-                # remove everything before target
-                state.queue_list = state.queue_list[index - 1:]
-                rebuild_queue(state)
-        if ctx.voice_client and ctx.voice_client.is_playing():
-            ctx.voice_client.stop()
-        await ctx.send(f"Jumped to #{index}")
+        if not (1 <= index <= len(state.queue_list)):
+            await ctx.send(f"Invalid index. Queue has {len(state.queue_list)} songs.")
+            return
+        if await state.jump_to(ctx, index - 1):
+            await ctx.send(f"Jumped to #{index}")
 
     @commands.command(name='swap')
-    async def swap_cmd(self, ctx: commands.Context, a: int, b: int):
+    async def swap_cmd(self, ctx, a: int, b: int):
         if not await self._check_dj(ctx):
             return
         state = get_guild_state(ctx.guild.id)
-        async with state.lock:
-            n = len(state.queue_list)
-            if not (1 <= a <= n and 1 <= b <= n):
-                await ctx.send(f"Indices must be between 1 and {n}")
-                return
-            state.queue_list[a - 1], state.queue_list[b - 1] = \
-                state.queue_list[b - 1], state.queue_list[a - 1]
-            rebuild_queue(state)
+        n = len(state.queue_list)
+        if not (1 <= a <= n and 1 <= b <= n):
+            await ctx.send(f"Indices must be between 1 and {n}")
+            return
+        await state.swap(a - 1, b - 1)
         await ctx.send(f"Swapped positions {a} and {b}")
 
     @commands.command(name='shuffle', aliases=['random'])
-    async def shuffle_cmd(self, ctx: commands.Context):
+    async def shuffle_cmd(self, ctx):
         state = get_guild_state(ctx.guild.id)
-        async with state.lock:
-            if len(state.queue_list) < 2:
-                await ctx.send("Need at least 2 songs to shuffle")
-                return
-            random.shuffle(state.queue_list)
-            rebuild_queue(state)
+        if len(state.queue_list) < 2:
+            await ctx.send("Need at least 2 songs to shuffle")
+            return
+        await state.shuffle()
         await ctx.send("Queue shuffled")
 
     @commands.command(name='clear')
-    async def clear_cmd(self, ctx: commands.Context):
+    async def clear_cmd(self, ctx):
         if not await self._check_dj(ctx):
             return
         state = get_guild_state(ctx.guild.id)
         size = len(state.queue_list)
-        async with state.lock:
-            state.queue = asyncio.Queue()
-            state.queue_list.clear()
-            state.history.clear()
+        if ctx.voice_client and ctx.voice_client.is_playing():
+            ctx.voice_client.stop()
+        state.queue_list.clear()
+        state.current_index = -1
+        state.current_song = None
+        state.is_playing = False
+        state.playback_active = False
         deleted = await state.cleanup_downloads()
         await ctx.send(f"Cleared {size} songs (deleted **{deleted}** files)")
 
     @commands.command(name='skip')
-    async def skip_cmd(self, ctx: commands.Context):
+    async def skip_cmd(self, ctx):
         if not ctx.voice_client or not ctx.voice_client.is_playing():
             await ctx.send("Nothing playing")
             return
+        state = get_guild_state(ctx.guild.id)
         if is_dj(ctx, ctx.guild.id):
             vote_skips[ctx.guild.id].clear()
+            state._force_advance = True
             ctx.voice_client.stop()
             await ctx.send("Skipped")
             return
         await self._vote_skip(ctx)
 
     @commands.command(name='voteskip', aliases=['vs'])
-    async def voteskip_cmd(self, ctx: commands.Context):
+    async def voteskip_cmd(self, ctx):
         if not ctx.voice_client or not ctx.voice_client.is_playing():
             await ctx.send("Nothing playing")
             return
         await self._vote_skip(ctx)
 
-    async def _vote_skip(self, ctx: commands.Context):
-        """Register a vote-skip. Majority of non-bot listeners needed."""
+    async def _vote_skip(self, ctx):
         vc = ctx.voice_client
         if not vc or not vc.channel:
             await ctx.send("I'm not connected to a voice channel.")
@@ -398,23 +372,22 @@ class Music(commands.Cog):
         if not vc.is_playing():
             await ctx.send("Nothing playing")
             return
-
         guild_id = ctx.guild.id
         vote_skips[guild_id].add(ctx.author.id)
-
         members = [m for m in vc.channel.members if not m.bot]
         needed = max(2, len(members) // 2 + 1)
         votes = len(vote_skips[guild_id])
-
         if votes >= needed:
             vote_skips[guild_id].clear()
+            state = get_guild_state(guild_id)
+            state._force_advance = True
             vc.stop()
             await ctx.send(f"Vote passed ({votes}/{needed}) - skipped")
         else:
             await ctx.send(f"Vote skip: **{votes}/{needed}**")
 
     @commands.command(name='pause')
-    async def pause_cmd(self, ctx: commands.Context):
+    async def pause_cmd(self, ctx):
         if not await self._check_dj(ctx):
             return
         if ctx.voice_client and ctx.voice_client.is_playing():
@@ -424,7 +397,7 @@ class Music(commands.Cog):
             await ctx.send("Nothing playing")
 
     @commands.command(name='resume')
-    async def resume_cmd(self, ctx: commands.Context):
+    async def resume_cmd(self, ctx):
         if not await self._check_dj(ctx):
             return
         if ctx.voice_client and ctx.voice_client.is_paused():
@@ -434,29 +407,27 @@ class Music(commands.Cog):
             await ctx.send("Nothing paused")
 
     @commands.command(name='stop')
-    async def stop_cmd(self, ctx: commands.Context):
+    async def stop_cmd(self, ctx):
         if not await self._check_dj(ctx):
             return
         state = get_guild_state(ctx.guild.id)
         if ctx.voice_client:
             ctx.voice_client.stop()
-        async with state.lock:
-            state.queue = asyncio.Queue()
-            state.queue_list.clear()
-            state.current_song = None
-            state.loop_type = None
-            state.history.clear()
-            state.is_playing = False
-            state.playback_active = False
+        state.queue_list.clear()
+        state.current_index = -1
+        state.current_song = None
+        state.loop_type = None
+        state.is_playing = False
+        state.playback_active = False
         deleted = await state.cleanup_downloads()
         await ctx.send(f"Stopped (deleted **{deleted}** files)")
 
     @commands.command(name='loop')
-    async def loop_cmd(self, ctx: commands.Context):
+    async def loop_cmd(self, ctx):
         state = get_guild_state(ctx.guild.id)
         if state.loop_type is None:
             state.loop_type = 'queue'
-            await ctx.send("Looping queue")
+            await ctx.send("Looping queue (last -> first)")
         elif state.loop_type == 'queue':
             state.loop_type = 'song'
             await ctx.send("Looping current song")
@@ -464,8 +435,9 @@ class Music(commands.Cog):
             state.loop_type = None
             await ctx.send("Looping disabled")
 
+    # ---------- filters ----------
     @commands.command(name='filter', aliases=['filters', 'eq'])
-    async def filter_cmd(self, ctx: commands.Context, name: str = ""):
+    async def filter_cmd(self, ctx, name: str = ""):
         state = get_guild_state(ctx.guild.id)
         name = name.lower().strip()
         if not name:
@@ -482,8 +454,9 @@ class Music(commands.Cog):
         suffix = " (applies to next track)" if state.is_playing else ""
         await ctx.send(f"Filter set to `{name}`{suffix}")
 
+    # ---------- 24/7 & DJ ----------
     @commands.command(name='247', aliases=['stay'])
-    async def toggle_247(self, ctx: commands.Context, mode: str = ""):
+    async def toggle_247(self, ctx, mode: str = ""):
         if not await self._check_dj(ctx):
             return
         gid = ctx.guild.id
@@ -498,14 +471,14 @@ class Music(commands.Cog):
             await ctx.send(f"24/7 mode is currently **{state}**. Use `!247 on|off`.")
 
     @commands.command(name='dj')
-    async def dj_cmd(self, ctx: commands.Context, action: str = "", *, role_arg: str = ""):
+    async def dj_cmd(self, ctx, action: str = "", *, role_arg: str = ""):
         gid = ctx.guild.id
         action = action.lower()
         if action == 'set':
             if not is_admin(ctx):
                 await ctx.send("Only admins can set the DJ role.")
                 return
-            if not ctx.message.role_mentions:
+            if not getattr(ctx.message, 'role_mentions', None):
                 await ctx.send("Usage: `!dj set @Role`")
                 return
             role = ctx.message.role_mentions[0]
@@ -525,73 +498,101 @@ class Music(commands.Cog):
             else:
                 await ctx.send("No DJ role set (everyone can use restricted commands).")
 
-    @commands.command(name='save')
-    async def save_cmd(self, ctx: commands.Context, *, name: str = ""):
+    # ---------- playlists ----------
+    @commands.command(name='qlist')
+    async def qlist_cmd(self, ctx, *, name: str = ""):
+        """Save current queue as a playlist of URLs."""
         name = name.strip()
         if not name:
-            await ctx.send("Usage: `!save <playlist_name>`")
+            await ctx.send("Usage: `!qlist <playlist_name>`")
             return
         state = get_guild_state(ctx.guild.id)
-        urls = [s.get('webpage_url') or s.get('url') for s in state.queue_list
-                if s.get('webpage_url') or s.get('source') == 'download']
-        if not urls:
-            await ctx.send("No downloadable tracks in queue to save.")
+        if not state.queue_list:
+            await ctx.send("Queue is empty - nothing to save.")
             return
-        playlists = load_playlists()
-        playlists[name] = {'tracks': urls, 'author': ctx.author.display_name, 'saved': time.time()}
-        save_playlists(playlists)
-        await ctx.send(f"Saved **{name}** ({len(urls)} tracks)")
+        urls: List[str] = []
+        for song in state.queue_list:
+            wp = song.get('webpage_url')
+            if wp and wp.startswith(('http://', 'https://')):
+                urls.append(wp)
+            elif song.get('source') == 'download' and song.get('url', '').startswith(('http://', 'https://')):
+                urls.append(song['url'])
+            # skip local files (can't be recreated from a URL)
+        if not urls:
+            await ctx.send("No downloadable tracks in queue - nothing to save.")
+            return
+        if playlist_mod.save_playlist(name, urls):
+            await ctx.send(f"Saved **{len(urls)}** tracks to playlist `{name}`")
+        else:
+            await ctx.send("Failed to save playlist.")
 
-    @commands.command(name='load')
-    async def load_cmd(self, ctx: commands.Context, *, name: str = ""):
+    @commands.command(name='qload')
+    async def qload_cmd(self, ctx, *, name: str = ""):
+        """Download a saved playlist and append it to the queue."""
         name = name.strip()
-        playlists = load_playlists()
-        if name not in playlists:
-            await ctx.send(f"Playlist `{name}` not found. Use `!playlists`.")
+        if not name:
+            await ctx.send("Usage: `!qload <playlist_name>`")
+            return
+        urls = playlist_mod.load_playlist(name)
+        if urls is None:
+            await ctx.send(f"Playlist `{name}` not found. Use `!qsearch` to browse.")
+            return
+        if not urls:
+            await ctx.send(f"Playlist `{name}` is empty.")
             return
         if not await self.ensure_voice(ctx):
             return
-        tracks = playlists[name].get('tracks', [])
-        if not tracks:
-            await ctx.send("Playlist is empty")
-            return
-        await ctx.send(f"Loading **{name}** ({len(tracks)} tracks)...")
         state = get_guild_state(ctx.guild.id)
-        entries = [{'webpage_url': u, 'id': u} for u in tracks]
+        total = len(urls)
+        status = await ctx.send(f"Loading **{name}** ({total} tracks)...")
+        progress_msg = await ctx.send(f"Progress: 0/{total}")
+        completed = 0
+
+        async def progress_cb(_song):
+            nonlocal completed
+            completed += 1
+            try:
+                await progress_msg.edit(content=f"Progress: {completed}/{total}")
+            except Exception:
+                pass
+
+        entries = [{'webpage_url': u, 'id': u} for u in urls]
         downloaded = await downloader.download_playlist_batch(
-            entries, ctx.author.display_name, state=state
+            entries, ctx.author.display_name, progress_callback=progress_cb, state=state
         )
-        async with state.lock:
-            for s in downloaded:
-                await state.queue.put(s)
-                state.queue_list.append(s)
-        await ctx.send(f"Loaded **{len(downloaded)}** tracks from **{name}**")
+        for song in downloaded:
+            await state.add_song(song)
+        try:
+            await status.edit(content=f"Loaded **{len(downloaded)}/{total}** tracks from **{name}**")
+            await progress_msg.delete()
+        except Exception:
+            pass
         if not state.is_playing and downloaded:
             await state.start_playback_loop(ctx)
 
-    @commands.command(name='playlists')
-    async def playlists_cmd(self, ctx: commands.Context):
-        playlists = load_playlists()
-        if not playlists:
-            await ctx.send("No saved playlists")
+    @commands.command(name='qsearch')
+    async def qsearch_cmd(self, ctx):
+        """Browse available playlists with arrow navigation."""
+        names = playlist_mod.list_playlists()
+        if not names:
+            await ctx.send("No playlists saved. Use `!qlist <name>` to create one.")
             return
-        lines = ["**Saved Playlists:**"]
-        for name, data in list(playlists.items())[:20]:
-            lines.append(f"- `{name}` - {len(data.get('tracks', []))} tracks")
-        await ctx.send("\n".join(lines))
+        view = playlist_mod.PlaylistBrowser(ctx, names)
+        msg = await ctx.send(view.format_page(), view=view)
+        view.message = msg
 
     @commands.command(name='deleteplaylist', aliases=['delplaylist'])
-    async def delete_playlist_cmd(self, ctx: commands.Context, *, name: str = ""):
-        playlists = load_playlists()
-        if name not in playlists:
-            await ctx.send(f"Playlist `{name}` not found.")
+    async def delete_playlist_cmd(self, ctx, *, name: str = ""):
+        if not name:
+            await ctx.send("Usage: `!deleteplaylist <name>`")
             return
-        del playlists[name]
-        save_playlists(playlists)
-        await ctx.send(f"Deleted playlist `{name}`")
+        if playlist_mod.delete_playlist(name):
+            await ctx.send(f"Deleted playlist `{name}`")
+        else:
+            await ctx.send(f"Playlist `{name}` not found.")
 
     @commands.command(name='playlist_local')
-    async def playlist_local(self, ctx: commands.Context, filename: str = ""):
+    async def playlist_local(self, ctx, filename: str = ""):
         if not filename:
             await ctx.send("Usage: `!playlist_local <filename>`")
             return
@@ -606,29 +607,28 @@ class Music(commands.Cog):
             with open(filepath, 'r', encoding='utf-8') as f:
                 lines = [l.strip() for l in f if l.strip()]
             added = 0
-            async with state.lock:
-                for line in lines:
-                    if os.path.exists(line):
-                        song = {
-                            'title': os.path.basename(line),
-                            'url': os.path.abspath(line),
-                            'requester': ctx.author.display_name,
-                            'duration': 0,
-                            'source': 'local',
-                        }
-                        await state.queue.put(song)
-                        state.queue_list.append(song)
-                        added += 1
-                    else:
-                        await ctx.send(f"Skipped (not found): `{line}`")
+            for line in lines:
+                if os.path.exists(line):
+                    song = {
+                        'title': os.path.basename(line),
+                        'url': os.path.abspath(line),
+                        'requester': ctx.author.display_name,
+                        'duration': 0,
+                        'source': 'local',
+                    }
+                    await state.add_song(song)
+                    added += 1
+                else:
+                    await ctx.send(f"Skipped (not found): `{line}`")
             await ctx.send(f"Added {added} local files")
             if not state.is_playing and added > 0:
                 await state.start_playback_loop(ctx)
         except Exception as e:
             await ctx.send(f"Error: {e}")
 
+    # ---------- meta ----------
     @commands.command(name='usage')
-    async def usage_cmd(self, ctx: commands.Context):
+    async def usage_cmd(self, ctx):
         data = DATA_USAGE[ctx.guild.id]
         mb = data['total_bytes'] / 1024 / 1024
         uptime = time.time() - data['start_time']
@@ -639,11 +639,12 @@ class Music(commands.Cog):
             f"**Usage**\n"
             f"Data: **{mb:.2f} MB**\n"
             f"Uptime: **{int(h)}h {int(m)}m**\n"
-            f"Tracked files: **{len(state.downloaded_files)}**"
+            f"Tracked files: **{len(state.downloaded_files)}**\n"
+            f"Queue: **{len(state.queue_list)}** songs"
         )
 
     @commands.command(name='cleanup')
-    async def cleanup_cmd(self, ctx: commands.Context):
+    async def cleanup_cmd(self, ctx):
         if not await self._check_dj(ctx):
             return
         state = get_guild_state(ctx.guild.id)
@@ -651,7 +652,7 @@ class Music(commands.Cog):
         await ctx.send(f"Deleted **{n}** tracked download files")
 
     @commands.command(name='shutdown')
-    async def shutdown_cmd(self, ctx: commands.Context):
+    async def shutdown_cmd(self, ctx):
         if not is_admin(ctx):
             await ctx.send("Admins only")
             return
@@ -660,24 +661,60 @@ class Music(commands.Cog):
         await self.bot.close()
 
     @commands.command(name='help')
-    async def help_cmd(self, ctx: commands.Context):
+    async def help_cmd(self, ctx):
         p = BOT_PREFIX
         text = (
-            "**Folda Tunez v0.5.2**\n"
-            f"`{p}join` / `{p}leave`\n"
-            f"`{p}stream <url|search>` - play from URL or search YouTube\n"
-            f"`{p}playnext <num|url|file>` - jump to front of queue\n"
-            f"`{p}queue` / `{p}np` - view queue / now playing\n"
-            f"`{p}move <from> <to>` - `{p}swap <a> <b>` - `{p}jump <n>`\n"
-            f"`{p}remove <n>` / `{p}rm <n>` - remove from queue\n"
-            f"`{p}shuffle` / `{p}random` - `{p}clear`\n"
-            f"`{p}skip` - `{p}voteskip` - `{p}pause` / `{p}resume`\n"
-            f"`{p}stop` - `{p}loop`\n"
-            f"`{p}filter <name>` - bassboost / nightcore / 8d / vaporwave / treble / normalize\n"
-            f"`{p}247 on|off` - auto-reconnect\n"
-            f"`{p}dj set @role` - `{p}dj clear` - `{p}dj`\n"
-            f"`{p}save <name>` - `{p}load <name>` - `{p}playlists` - `{p}deleteplaylist <name>`\n"
-            f"`{p}playlist_local <file>` - `{p}usage` - `{p}cleanup` - `{p}shutdown`\n"
-            "**Slash:** `/play` `/skip` `/pause` `/resume` `/np` `/queue` `/filter`"
+            "**Folda Tunez v0.5.3**\n"
+            "\n"
+            "**Playback:**\n"
+            f"`{p}join` - Join your current voice channel\n"
+            f"`{p}leave` - Leave voice, clear queue, delete downloaded files\n"
+            f"`{p}play <query|url>` - Search YouTube (top 5) or play a URL. Playlists supported\n"
+            f"`{p}stream <query|url>` - Same as `play` (alias)\n"
+            f"`{p}playnext <num|url|file>` - Move queue item #num to next, or download/add a URL/file to play next\n"
+            f"`{p}pause` / `{p}resume` - Pause or resume current track\n"
+            f"`{p}skip` - Skip current track (DJs skip instantly; others start a vote-skip)\n"
+            f"`{p}voteskip` - Vote to skip (majority of non-bot listeners required)\n"
+            f"`{p}stop` - Stop playback, clear queue, delete downloaded files\n"
+            f"`{p}loop` - Cycle loop: off -> queue -> song -> off\n"
+            "\n"
+            "**Queue:**\n"
+            f"`{p}queue` / `{p}q` - Show full queue. Current track marked with `> ` (bold while playing)\n"
+            f"`{p}np` - Show now playing with elapsed / total time\n"
+            f"`{p}remove <n>` / `{p}rm` - Remove track #n. If it was the current track, plays the next\n"
+            f"`{p}move <from> <to>` - Move a track from one position to another\n"
+            f"`{p}swap <a> <b>` - Swap two positions\n"
+            f"`{p}jump <n>` - Skip directly to track #n (removes nothing; just plays it)\n"
+            f"`{p}shuffle` / `{p}random` - Shuffle the queue (numbers renumbered 1..N)\n"
+            f"`{p}clear` - Clear queue, delete downloaded files\n"
+            "\n"
+            "**Playlists (folder-based, one URL per line):**\n"
+            f"`{p}qlist <name>` - Save the current queue as a playlist\n"
+            f"`{p}qload <name>` - Download and add a saved playlist to the queue\n"
+            f"`{p}qsearch` - Browse playlists (10 per page, < / > arrows)\n"
+            f"`{p}deleteplaylist <name>` - Delete a saved playlist\n"
+            "\n"
+            "**Audio:**\n"
+            f"`{p}filter` - List available filters and current one\n"
+            f"`{p}filter <name>` - Set filter: bassboost, bassboost_high, nightcore, vaporwave, 8d, treble, normalize, none\n"
+            "  (applies to the next track; avoids a glitch in the currently-playing audio)\n"
+            "\n"
+            "**Config:**\n"
+            f"`{p}dj set @Role` - Set DJ role (admins only)\n"
+            f"`{p}dj clear` - Remove DJ role (admins only)\n"
+            f"`{p}dj` - Show current DJ role\n"
+            f"`{p}247 on|off` - Enable/disable 24/7 mode (auto-reconnect if disconnected)\n"
+            "\n"
+            "**Info:**\n"
+            f"`{p}usage` - Data usage, uptime, tracked files, queue size\n"
+            f"`{p}help` - This message\n"
+            "\n"
+            "**Slash Commands:**\n"
+            "`/play` `/skip` `/pause` `/resume` `/np` `/queue` `/filter`\n"
+            "\n"
+            "**Admin:**\n"
+            f"`{p}cleanup` - Delete all tracked download files for this guild\n"
+            f"`{p}playlist_local <file>` - Load local file paths from a text file (one path per line)\n"
+            f"`{p}shutdown` - Shutdown the bot (admins only)\n"
         )
         await ctx.send(text)

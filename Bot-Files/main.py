@@ -1,4 +1,5 @@
 """Bot entry point, events, and slash-command registration."""
+
 import asyncio
 import subprocess
 
@@ -18,6 +19,7 @@ from runtime import last_join_channels, stay_247
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+intents.members = True  # needed for !dj and CLI members listing
 
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, case_insensitive=True)
 
@@ -81,7 +83,7 @@ async def _register_slash_commands():
 @bot.event
 async def on_ready():
     bot_logger.info(f"Logged in as {bot.user}")
-    print(f"Folda Tunez v0.5.2 - Logged in as {bot.user}")
+    print(f"Folda Tunez v0.5.3 - Logged in as {bot.user}")
     bot.remove_command('help')
     await bot.add_cog(Music(bot))
 

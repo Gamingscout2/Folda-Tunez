@@ -1,5 +1,5 @@
 """FFmpeg audio source with data-usage tracking, plus available filters."""
-from typing import Optional
+from typing import Dict, Optional
 
 import discord
 

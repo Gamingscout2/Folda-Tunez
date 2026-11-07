@@ -6,15 +6,16 @@ from typing import Any, Dict, List, Optional
 
 import yt_dlp as youtube_dl
 
-from config import DOWNLOADS_DIR, DOWNLOAD_TIMEOUT, MAX_CONCURRENT_DL, MAX_PLAYLIST_ITEMS, SUPPORTED_AUDIO_EXTENSIONS
+from config import (
+    DOWNLOADS_DIR, DOWNLOAD_TIMEOUT, MAX_CONCURRENT_DL,
+    MAX_PLAYLIST_ITEMS, SUPPORTED_AUDIO_EXTENSIONS,
+)
 from guild_state import GuildState
 from loggers import bot_logger, yt_logger
 from runtime import ALL_DOWNLOADED_FILES
 
 
 class Downloader:
-    """Hyperthreaded audio downloader with yt-dlp."""
-
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DL, thread_name_prefix='dl')
         self.ydl_opts_base = {
@@ -73,15 +74,16 @@ class Downloader:
         self, entries: List[Dict], requester: str,
         progress_callback=None, state: Optional[GuildState] = None,
     ) -> List[Dict]:
-        """Hyperthreaded playlist download with semaphore control."""
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_DL)
         capped = entries[:MAX_PLAYLIST_ITEMS]
 
         async def download_one(entry):
             async with semaphore:
-                video_url = (entry.get('webpage_url')
-                             or entry.get('url')
-                             or f"https://youtu.be/{entry['id']}")
+                video_url = (
+                    entry.get('webpage_url')
+                    or entry.get('url')
+                    or f"https://youtu.be/{entry['id']}"
+                )
                 song = await self.download_single(video_url)
                 if song:
                     song['requester'] = requester
@@ -103,7 +105,6 @@ downloader = Downloader()
 
 
 async def search_youtube(query: str, limit: int = 5) -> List[dict]:
-    """Robust YouTube search returning validated entries."""
     query = query.strip()
     if not query or len(query) > 200:
         return []
@@ -111,8 +112,7 @@ async def search_youtube(query: str, limit: int = 5) -> List[dict]:
         info = await downloader.extract_info(f"ytsearch{limit}:{query}", download=False)
         if not info or 'entries' not in info:
             return []
-        return [e for e in info['entries']
-                if e and e.get('id') and e.get('title')]
+        return [e for e in info['entries'] if e and e.get('id') and e.get('title')]
     except Exception as e:
         bot_logger.error(f"Search failed for '{query}': {e}")
         return []

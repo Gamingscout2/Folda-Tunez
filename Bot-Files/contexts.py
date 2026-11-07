@@ -5,7 +5,6 @@ import discord
 
 
 class MockContext:
-    """Context used by the CLI admin tool."""
     def __init__(self, guild: discord.Guild, channel: Optional[discord.TextChannel] = None):
         self.guild = guild
         self.voice_client = guild.voice_client
@@ -21,7 +20,7 @@ class MockContext:
         self.channel = channel
         self.message = type('MockMessage', (), {
             'guild': guild, 'author': self.author,
-            'channel': channel, 'content': ''
+            'channel': channel, 'content': '', 'role_mentions': []
         })()
 
     async def send(self, content, **kwargs):
@@ -37,7 +36,6 @@ class MockContext:
 
 
 class InteractionContext:
-    """Adapts a discord.Interaction to look like commands.Context."""
     def __init__(self, interaction: discord.Interaction):
         self.interaction = interaction
         self.guild = interaction.guild
@@ -47,5 +45,4 @@ class InteractionContext:
         self.message = None
 
     async def send(self, content, **kwargs):
-        # Slash-command caller must have deferred first
         return await self.interaction.followup.send(content, **kwargs)
