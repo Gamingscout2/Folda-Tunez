@@ -1,3 +1,5 @@
+""" Folda-Tunez by Phaedra Parsons"""
+""" The homebrew discord music bot"""
 """Bot entry point, events, and slash-command registration."""
 
 import asyncio
