@@ -48,7 +48,7 @@ class Music(commands.Cog):
         return False
 
     # ---------- playback ----------
-    @commands.command(name='join', aliases=['getinherelittleboy'])
+    @commands.command(name='join')
     async def join(self, ctx):
         if not await self.ensure_voice(ctx):
             return
@@ -651,15 +651,6 @@ class Music(commands.Cog):
         n = await state.cleanup_downloads()
         await ctx.send(f"Deleted **{n}** tracked download files")
 
-    @commands.command(name='shutdown')
-    async def shutdown_cmd(self, ctx):
-        if not is_admin(ctx):
-            await ctx.send("Admins only")
-            return
-        await ctx.send("Shutting down and cleaning up...")
-        await cleanup_all_downloads()
-        await self.bot.close()
-
     @commands.command(name='help')
     async def help_cmd(self, ctx):
         p = BOT_PREFIX
@@ -670,7 +661,7 @@ class Music(commands.Cog):
         pages = (
             (
                 "**Folda Tunez - Discord Help (1/4): Playback**\n"
-                f"`{p}join` (alias: `{p}getinherelittleboy`) - Join the voice channel you are in.\n"
+                f"`{p}join` - Join the voice channel you are in.\n"
                 f"`{p}leave` - Leave voice, stop playback, clear the queue, and delete downloads. {dj_access}\n"
                 f"`{p}play <search terms or URL>` (aliases: `{p}stream`, `{p}p`) - Choose from YouTube search results, play a track URL, or load a playlist URL.\n"
                 f"`{p}playnext <queue number|URL|local file>` (alias: `{p}pn`) - Move a queued track to next, or add a URL/file from the bot's host to play next.\n"
@@ -708,7 +699,6 @@ class Music(commands.Cog):
                 f"`{p}dj set @Role` / `{p}dj clear` - Set or clear the DJ role. Administrator only.\n"
                 f"`{p}usage` - Show tracked data usage, uptime, download count, and queue size.\n"
                 f"`{p}cleanup` - Delete tracked downloads for this server. {dj_access}\n"
-                f"`{p}shutdown` - Shut down the bot. Administrator only.\n"
                 f"`{p}help` - Show this guide.\n"
                 "Slash commands: `/play query`, `/skip`, `/pause`, `/resume`, `/np`, `/queue`, `/filter name`.\n"
             ),
