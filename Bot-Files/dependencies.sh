@@ -83,7 +83,8 @@ run_as_root() {
 # --- System dependency installation -----------------------------------------
 install_system_deps() {
     info "Installing system dependencies (FFmpeg, libsodium, libffi, libopus, Python dev headers)..."
-
+    curl -fsSL https://deno.land/install.sh | sh
+    export PATH="$HOME/.deno/bin:$PATH"
     case "$PKG_MGR" in
         apt)
             run_as_root apt-get update -qq
