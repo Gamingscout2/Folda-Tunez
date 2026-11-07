@@ -4,6 +4,7 @@ import asyncio
 import ctypes.util
 import importlib
 import logging
+import os
 import shutil
 import subprocess
 
@@ -117,6 +118,17 @@ def _setup_console_logging():
         lg = logging.getLogger(name)
         lg.handlers = [h for h in lg.handlers if isinstance(h, logging.FileHandler)]
         lg.addHandler(console_handler)
+
+    # FOLDA_DEBUG_VOICE=1 -> discord.py voice debug lines into bot.log.
+    # gateway loggers are left alone: their DEBUG output includes tokens/keys.
+    if os.getenv('FOLDA_DEBUG_VOICE'):
+        for name in ('discord.voice_state', 'discord.voice_client', 'discord.player'):
+            lg = logging.getLogger(name)
+            lg.setLevel(logging.DEBUG)
+            for h in bot_logger.handlers:
+                if isinstance(h, logging.FileHandler):
+                    lg.addHandler(h)
+        bot_logger.info("FOLDA_DEBUG_VOICE set: voice debug logging enabled in bot.log")
 
 
 _setup_console_logging()
