@@ -15,7 +15,9 @@
 #
 # Safe to re-run.
 #
-# Usage: chmod +x global_depends.sh && ./global_depends.sh
+# Usage: chmod +x global_depends.sh && ./global_depends.sh [--force]
+#   --force   reinstall the system packages even if already present
+#             (apt --reinstall, dnf reinstall, pacman without --needed)
 
 set -euo pipefail
 
@@ -25,6 +27,14 @@ PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
 DENO_PATH_DEFAULT="$HOME/.deno/bin/deno"
 YTDLP_CONFIG_DIR="$HOME/.config/yt-dlp"
 YTDLP_CONFIG_FILE="$YTDLP_CONFIG_DIR/config"
+FORCE=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --force) FORCE=1 ;;
+        -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "Unknown option: $_arg (try --help)" >&2; exit 1 ;;
+    esac
+done
 # -----------------------------------------------------------------------------
 
 # --- Logging -----------------------------------------------------------------
@@ -109,10 +119,16 @@ detect_distro() {
 # --- System packages ---------------------------------------------------------
 install_system_packages() {
     info "Installing system packages..."
+    local apt_flags=(-y) pacman_flags=(-Sy --noconfirm --needed)
+    if (( FORCE )); then
+        info "--force: reinstalling packages even if present."
+        apt_flags+=(--reinstall)
+        pacman_flags=(-Sy --noconfirm)
+    fi
     case "$PKG_MGR" in
         apt)
             run_as_root apt-get update -qq
-            run_as_root apt-get install -y \
+            run_as_root apt-get install "${apt_flags[@]}" \
                 ffmpeg libopus0 libopus-dev \
                 libsodium-dev libffi-dev \
                 python3 python3-dev python3-venv python3-pip \
@@ -120,12 +136,17 @@ install_system_packages() {
                 build-essential pkg-config
             ;;
         dnf)
+            # reinstall fails for packages that aren't installed yet, so install first
             run_as_root dnf install -y \
                 opus opus-devel \
                 libsodium-devel libffi-devel \
                 python3 python3-devel python3-pip \
                 curl ca-certificates git unzip xz \
                 gcc gcc-c++ make pkgconfig
+            if (( FORCE )); then
+                run_as_root dnf reinstall -y opus opus-devel libsodium-devel libffi-devel \
+                    || warn "dnf reinstall reported a problem (continuing)."
+            fi
             # ffmpeg lives in RPM Fusion on RHEL-likes; Fedora ships ffmpeg-free
             if ! command -v ffmpeg >/dev/null 2>&1; then
                 run_as_root dnf install -y ffmpeg \
@@ -134,7 +155,7 @@ install_system_packages() {
             fi
             ;;
         pacman)
-            run_as_root pacman -Sy --noconfirm --needed \
+            run_as_root pacman "${pacman_flags[@]}" \
                 ffmpeg opus libsodium libffi \
                 python python-pip \
                 curl ca-certificates git unzip xz base-devel pkgconf

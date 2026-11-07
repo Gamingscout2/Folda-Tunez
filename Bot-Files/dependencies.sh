@@ -2,44 +2,52 @@
 #
 # dependencies.sh
 #
-# Python dependencies for Folda Tunez. Installs into a virtual environment:
+# Python dependencies for Folda Tunez, installed into a virtual environment:
 #   - if a venv is already active, that one is used
 #   - otherwise an existing ./venv or ./.venv is activated, or ./venv is created
+#
+# Packages come from requirements.txt (pinned: see the davey note there) and
+# are FORCE-REINSTALLED every run so stale or wrong versions can't survive.
+# The script then runs a real audio self-test (ffmpeg -> discord.py -> libopus).
 #
 # System packages (ffmpeg, libopus, Deno, ...) are NOT handled here; run
 # global_depends.sh first, outside the venv.
 #
-# Safe to re-run.
-#
-# Usage: chmod +x dependencies.sh && ./dependencies.sh
-#        VENV_DIR=myvenv PYTHON_BIN=python3.12 ./dependencies.sh
+# Usage: ./dependencies.sh [--recreate] [--no-force]
+#   --recreate   delete the venv and build a fresh one (use this if audio is
+#                still silent after a normal run)
+#   --no-force   plain 'pip install -U' instead of --force-reinstall
+#   VENV_DIR=myvenv PYTHON_BIN=python3.14 ./dependencies.sh
 
 set -euo pipefail
 
 # --- Configuration -----------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
+REQ_FILE="${REQ_FILE:-$SCRIPT_DIR/requirements.txt}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 MIN_PY_MAJOR=3
 MIN_PY_MINOR=10   # discord.py 2.x requires 3.10+
-
-# Discord enforces DAVE (E2EE) on voice; discord.py 2.7+ ships it via the
-# 'davey' package in the [voice] extra. Older versions join but stay silent.
-PIP_PACKAGES=(
-    "discord.py[voice]>=2.7"
-    "PyNaCl>=1.5"
-    "davey"
-    "yt-dlp"
-    "yt-dlp-ejs"
-    "python-dotenv"
-    "audioop-lts; python_version >= '3.13'"
-)
+RECREATE=0
+FORCE=1
 # -----------------------------------------------------------------------------
 
 info()  { printf '\033[1;34m[INFO]\033[0m  %s\n' "$*"; }
 warn()  { printf '\033[1;33m[WARN]\033[0m  %s\n' "$*"; }
 error() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; }
 ok()    { printf '\033[1;32m[ OK ]\033[0m  %s\n' "$*"; }
+
+parse_args() {
+    local a
+    for a in "$@"; do
+        case "$a" in
+            --recreate) RECREATE=1 ;;
+            --no-force) FORCE=0 ;;
+            -h|--help)  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            *) error "Unknown option: $a (try --help)"; exit 1 ;;
+        esac
+    done
+}
 
 # --- Python check (system interpreter, used only to build the venv) ----------
 check_python() {
@@ -54,9 +62,20 @@ check_python() {
     ok "Python $("$PYTHON_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])') detected."
 }
 
+check_requirements_file() {
+    if [[ ! -f "$REQ_FILE" ]]; then
+        error "Missing ${REQ_FILE}. It ships with the bot; run 'git pull' or restore it."
+        exit 1
+    fi
+}
+
 # --- Venv: use the active one, else find/create one --------------------------
 activate_venv() {
     if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        if (( RECREATE )); then
+            error "--recreate cannot rebuild the active venv (${VIRTUAL_ENV}). Run 'deactivate' first."
+            exit 1
+        fi
         ok "Using active virtualenv: ${VIRTUAL_ENV}"
         return
     fi
@@ -70,11 +89,22 @@ activate_venv() {
     fi
     [[ "$dir" = /* ]] || dir="$PROJECT_DIR/$dir"
 
+    # only ever delete a directory that looks like a venv
+    if (( RECREATE )) && [[ -e "$dir" ]]; then
+        if [[ -f "$dir/pyvenv.cfg" ]]; then
+            warn "Removing existing virtualenv ${dir}"
+            rm -rf -- "$dir"
+        else
+            error "${dir} exists but has no pyvenv.cfg; refusing to delete it."
+            exit 1
+        fi
+    fi
+
     if [[ ! -f "$dir/bin/activate" ]]; then
         info "Creating virtual environment in ${dir}..."
         if ! "$PYTHON_BIN" -m venv "$dir"; then
-            rm -rf "$dir"
-            error "venv creation failed. On Debian/Ubuntu install python3-venv (global_depends.sh does this)."
+            rm -rf -- "$dir"
+            error "venv creation failed. Run ./global_depends.sh (installs python3-venv/devel)."
             exit 1
         fi
     else
@@ -94,87 +124,151 @@ install_python_packages() {
     info "Upgrading pip, setuptools, wheel..."
     python -m pip install --upgrade pip setuptools wheel
 
-    info "Installing Python packages..."
-    python -m pip install --upgrade "${PIP_PACKAGES[@]}"
+    local flags=(--upgrade)
+    if (( FORCE )); then
+        flags+=(--force-reinstall --no-cache-dir)
+        info "Force-reinstalling every package from ${REQ_FILE}..."
+    else
+        info "Installing packages from ${REQ_FILE}..."
+    fi
+    python -m pip install "${flags[@]}" -r "$REQ_FILE"
+
+    info "Checking dependency consistency (pip check)..."
+    if python -m pip check; then
+        ok "pip check: no broken requirements."
+    else
+        warn "pip check reported conflicts (see above). Re-run with --recreate if audio is silent."
+    fi
+
+    info "Installed versions:"
+    python -m pip list 2>/dev/null | grep -Ei '^(discord|davey|pynacl|yt-dlp|python-dotenv|audioop|aiohttp) ' || true
     ok "Python packages installed."
 }
 
 # --- Verification (runs inside the venv) -------------------------------------
 verify_install() {
-    info "Verifying installation..."
+    info "Verifying installation and running the audio self-test..."
 
-    if ! python - <<'PY'
+    if ! FFMPEG_BIN="${FFMPEG_PATH:-ffmpeg}" python - <<'PY'
 import ctypes.util
+import os
+import shutil
+import subprocess
 import sys
 
 failed = False
 
-def need(label, fn):
+
+def check(label, fn):
     global failed
     try:
-        print(f"[ OK ]  {label} {fn()}")
+        res = fn()
+        print(f"[ OK ]  {label}{': ' + str(res) if res else ''}")
     except Exception as e:
         failed = True
-        print(f"[ERROR] {label} unavailable: {e}")
+        print(f"[ERROR] {label}: {type(e).__name__}: {e}")
 
-def dpy():
+
+def ver(name):
+    from importlib.metadata import version
+    return version(name)
+
+
+def discord_ok():
     import discord
-    if discord.version_info < (2, 7):
-        raise RuntimeError(f"discord.py {discord.__version__} predates DAVE voice support, need >= 2.7")
+    if discord.version_info < (2, 7, 1):
+        raise RuntimeError(f"discord.py {discord.__version__} too old, need >= 2.7.1")
     return discord.__version__
 
-def nacl_v():
-    import nacl
-    return nacl.__version__
 
-def davey_v():
+def davey_ok():
+    v = ver("davey")
+    parts = tuple(int(p) for p in v.split(".")[:3] if p.isdigit())
+    if parts >= (0, 2, 0):
+        raise RuntimeError(
+            f"davey {v} breaks voice with discord.py 2.7 (bot would be SILENT). "
+            "Run ./dependencies.sh --recreate to install davey<0.2."
+        )
     import davey
-    return getattr(davey, "__version__", "")
+    # real object construction + key package exercises the native module
+    s = davey.DaveSession(davey.DAVE_PROTOCOL_VERSION, 1, 2)
+    if not s.get_serialized_key_package():
+        raise RuntimeError("DAVE session produced no key package")
+    return v
 
-def ytdlp():
-    import yt_dlp
-    return yt_dlp.version.__version__
 
-def dotenv_v():
+def nacl_ok():
+    import nacl.secret
+    nacl.secret.Aead(b"\0" * 32)
+    return ver("PyNaCl")
+
+
+def other():
     import dotenv  # noqa: F401
-    return "loaded"
-
-def audioop_v():
+    import yt_dlp
     try:
         import audioop  # noqa: F401
     except ImportError:
         import audioop_lts  # noqa: F401
-    return "available"
+    return f"yt-dlp {yt_dlp.version.__version__}"
 
-need("discord.py", dpy)
-need("PyNaCl", nacl_v)
-need("davey (DAVE voice E2EE)", davey_v)
-need("yt-dlp", ytdlp)
-need("python-dotenv", dotenv_v)
-need("audioop", audioop_v)
 
-opus = ctypes.util.find_library("opus")
-if opus:
-    print(f"[ OK ]  libopus: {opus}")
-else:
-    print("[WARN]  libopus not found by ctypes (main.py also probes common paths at startup)")
+def opus_ok():
+    import discord
+    if not discord.opus.is_loaded():
+        names = [ctypes.util.find_library("opus"), "libopus.so.0", "libopus.so"]
+        for n in filter(None, names):
+            try:
+                discord.opus.load_opus(n)
+                break
+            except Exception:
+                continue
+    if not discord.opus.is_loaded():
+        raise RuntimeError("libopus could not be loaded. Run ./global_depends.sh to install it.")
+    enc = discord.opus.Encoder()
+    out = enc.encode(b"\0" * enc.FRAME_SIZE, enc.SAMPLES_PER_FRAME)
+    if not out:
+        raise RuntimeError("libopus encoder returned nothing")
+    return "loaded, encoder works"
 
+
+def pipeline_ok():
+    """ffmpeg -> PCM -> discord.py -> libopus, the exact path used for playback."""
+    import discord
+    exe = os.environ.get("FFMPEG_BIN", "ffmpeg")
+    if not shutil.which(exe):
+        raise RuntimeError(f"ffmpeg not found ('{exe}'). Run ./global_depends.sh.")
+    src = discord.FFmpegPCMAudio(
+        "sine=frequency=440:duration=1", executable=exe,
+        before_options="-f lavfi", options="-loglevel error",
+    )
+    enc = discord.opus.Encoder()
+    frames = total = 0
+    try:
+        while True:
+            pcm = src.read()
+            if not pcm:
+                break
+            frames += 1
+            total += len(enc.encode(pcm, enc.SAMPLES_PER_FRAME))
+    finally:
+        src.cleanup()
+    if frames < 40 or total == 0:
+        raise RuntimeError(f"only {frames} frames / {total} opus bytes from 1s of audio")
+    return f"{frames} frames -> {total} opus bytes"
+
+
+check("discord.py", discord_ok)
+check("davey (DAVE voice E2EE, must be <0.2)", davey_ok)
+check("PyNaCl", nacl_ok)
+check("yt-dlp / dotenv / audioop", other)
+check("libopus", opus_ok)
+check("audio pipeline", pipeline_ok)
 sys.exit(1 if failed else 0)
 PY
     then
-        error "Python package verification failed. See messages above."
+        error "Verification FAILED. Fix the [ERROR] lines above; the bot will be silent until they pass."
         exit 1
-    fi
-
-    if command -v ffmpeg >/dev/null 2>&1; then
-        ok "ffmpeg: $(ffmpeg -version 2>/dev/null | head -n1)"
-        local encoders
-        encoders="$(ffmpeg -hide_banner -encoders 2>/dev/null || true)"
-        if ! grep -q libopus <<<"$encoders"; then
-            warn "ffmpeg has no libopus encoder - the bot would be silent. Run ./global_depends.sh."
-        fi
-    else
-        warn "ffmpeg not on PATH. Run ./global_depends.sh (outside the venv) to install it."
     fi
 
     if [[ ! -f "$PROJECT_DIR/.env" ]]; then
@@ -183,18 +277,20 @@ PY
 }
 
 main() {
+    parse_args "$@"
     echo
     info "Folda Tunez Python dependency installer"
     info "Project dir: ${PROJECT_DIR}"
     echo
 
     check_python
+    check_requirements_file
     activate_venv
     install_python_packages
     verify_install
 
     echo
-    ok "All Python dependencies installed."
+    ok "All Python dependencies installed and the audio self-test passed."
     echo
     info "Next steps:"
     echo "  1. source ${VIRTUAL_ENV}/bin/activate"

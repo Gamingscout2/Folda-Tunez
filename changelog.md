@@ -1,5 +1,29 @@
 # Changelog
 
+## Audio fix: davey pinned below 0.2 (root cause), forced full dependency install
+
+Root cause of the silent bot: `davey` was unpinned, so the installer pulled `davey 0.2.0`, a
+breaking release of the DAVE (voice E2EE) library. discord.py 2.7.x still uses the 0.1.x API
+(`process_welcome(msg)`, no `prepare_transition`/`execute_transition`), so the encryption key
+never became usable. The bot connected, ffmpeg ran and the log looked healthy, but Discord
+received nothing it could play. The legacy build in `old/` worked because its venv had
+`davey 0.1.7` (with `PyNaCl 1.6.2`, `discord.py 2.7.1`).
+
+- New `requirements.txt`: pins `davey>=0.1.7,<0.2`, `discord.py>=2.7.1,<2.8`, `PyNaCl>=1.5,<1.7`
+  and the rest. Resolves to the same versions as the working legacy venv.
+- `dependencies.sh` installs from `requirements.txt` with `--force-reinstall --no-cache-dir` on
+  every run, runs `pip check`, and lists installed versions. `--recreate` deletes and rebuilds the
+  venv (only if it has a `pyvenv.cfg`); `--no-force` does a normal upgrade instead.
+- `dependencies.sh` now ends with a real self-test: version checks (fails on `davey>=0.2`), a DAVE
+  session + key package, libopus load + encode, and ffmpeg -> PCM -> libopus on a generated tone.
+  It exits non-zero if any step fails.
+- `global_depends.sh --force` reinstalls the system packages (apt `--reinstall`, dnf `reinstall`,
+  pacman without `--needed`).
+- `main.py` startup check logs CRITICAL if the installed `davey` is 0.2 or newer.
+- `audio.py` stays on the PCM source (`FFmpegPCMAudio`) used by the legacy build.
+
+To fix an existing server: `deactivate; ./dependencies.sh --recreate`, then restart the bot.
+
 ## Audio source reverted to PCM (legacy path)
 
 - `audio.py`: `TrackedFFmpegPCMAudio` is `discord.FFmpegPCMAudio` again (as in `old.py`).

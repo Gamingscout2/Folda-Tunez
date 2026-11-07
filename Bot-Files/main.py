@@ -69,8 +69,23 @@ def _check_voice_stack() -> bool:
             ok = False
             bot_logger.critical(
                 f"Python package '{pkg}' is missing - voice will connect but stay silent. "
-                f"Fix: pip install -U 'discord.py[voice]' (inside the venv)"
+                f"Fix: ./dependencies.sh (inside the project, it installs requirements.txt)"
             )
+
+    # davey 0.2.0 changed the DAVE API; discord.py 2.7.x doesn't speak it, so
+    # the bot connects and plays but nothing is audible
+    try:
+        from importlib.metadata import version
+        dv = version("davey")
+        parts = tuple(int(p) for p in dv.split(".")[:2] if p.isdigit())
+        if parts >= (0, 2):
+            ok = False
+            bot_logger.critical(
+                f"davey {dv} is incompatible with discord.py {discord.__version__}: voice will be "
+                "SILENT. Fix: ./dependencies.sh --recreate (installs davey<0.2 from requirements.txt)"
+            )
+    except Exception:
+        pass
 
     ffmpeg_path = shutil.which(FFMPEG_PATH) or FFMPEG_PATH
     try:
