@@ -139,7 +139,6 @@ class AdminCLI:
             'guildlog':       self.cmd_guildlog,
             'threads':        self.cmd_threads,
             'kill':           self.cmd_kill,
-            'shutdown':       self.cmd_kill,
             'exit':           self.cmd_exit,
             'quit':           self.cmd_exit,
         }
@@ -369,7 +368,7 @@ class AdminCLI:
             "  playlists                        - list saved playlists\n"
             "\n"
             "Lifecycle:\n"
-            "  kill / shutdown                  - shut the bot down\n"
+            "  kill                             - shut the bot down\n"
             "  exit / quit                      - exit CLI (bot keeps running)\n"
             "  help                             - this list\n"
         )
