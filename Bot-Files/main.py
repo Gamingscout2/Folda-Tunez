@@ -15,6 +15,9 @@ from loggers import bot_logger
 from music import Music
 from runtime import last_join_channels, stay_247
 
+import discord
+if not discord.opus.is_loaded():
+    discord.opus.load_opus("libopus.so.0")
 
 intents = discord.Intents.default()
 intents.message_content = True

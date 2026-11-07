@@ -85,6 +85,7 @@ install_system_deps() {
     info "Installing system dependencies (FFmpeg, libsodium, libffi, libopus, Python dev headers)..."
     curl -fsSL https://deno.land/install.sh | sh
     export PATH="$HOME/.deno/bin:$PATH"
+    pip install -U yt-dlp-ejs
     pip install --upgrade "discord.py[voice]" yt-dlp python-dotenv audioop-lts
     case "$PKG_MGR" in
         apt)

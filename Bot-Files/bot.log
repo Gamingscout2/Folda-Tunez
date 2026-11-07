@@ -5,3 +5,27 @@
 2026-11-06 21:47:47,727 - bot - ERROR - Voice reconnect failed: Already connected to a voice channel.
 2026-11-06 22:05:54,992 - bot - INFO - Logged in as Folda Tunez#5187
 2026-11-06 22:05:55,337 - bot - INFO - Slash commands synced
+2026-11-06 22:07:23,766 - bot - INFO - Logged in as Folda Tunez#5187
+2026-11-06 22:07:24,041 - bot - INFO - Slash commands synced
+2026-11-06 22:08:00,831 - bot - ERROR - Download failed for https://youtu.be/6vc9Mz2tfHM: [0;31mERROR:[0m Postprocessing: audio conversion failed: Exiting normally, received signal 2.
+2026-11-06 22:08:44,728 - bot - INFO - Logged in as Folda Tunez#5187
+2026-11-06 22:08:44,935 - bot - INFO - Slash commands synced
+2026-11-06 22:09:25,651 - bot - INFO - Started playback loop for guild 700095276614025226
+2026-11-06 22:10:24,306 - bot - INFO - Stopped playback loop for guild 700095276614025226
+2026-11-06 22:10:24,361 - bot - INFO - Stopped playback loop for guild 700095276614025226
+2026-11-06 22:13:05,756 - bot - INFO - Logged in as Folda Tunez#5187
+2026-11-06 22:13:06,008 - bot - INFO - Slash commands synced
+2026-11-06 22:13:37,796 - bot - INFO - Started playback loop for guild 700095276614025226
+2026-11-06 22:14:07,899 - bot - ERROR - Voice reconnect failed: Already connected to a voice channel.
+2026-11-06 22:21:10,107 - bot - INFO - Logged in as Folda Tunez#5187
+2026-11-06 22:21:10,326 - bot - INFO - Slash commands synced
+2026-11-06 22:21:49,919 - bot - INFO - Started playback loop for guild 700095276614025226
+2026-11-06 22:22:26,004 - bot - ERROR - Voice reconnect failed: Already connected to a voice channel.
+2026-11-06 22:24:51,201 - bot - INFO - Logged in as Folda Tunez#5187
+2026-11-06 22:24:51,445 - bot - INFO - Slash commands synced
+2026-11-06 22:25:34,224 - bot - INFO - Started playback loop for guild 700095276614025226
+2026-11-06 22:26:03,907 - bot - ERROR - Voice reconnect failed: Already connected to a voice channel.
+2026-11-06 22:27:19,718 - bot - INFO - Logged in as Folda Tunez#5187
+2026-11-06 22:27:20,649 - bot - INFO - Slash commands synced
+2026-11-06 22:27:54,712 - bot - INFO - Started playback loop for guild 700095276614025226
+2026-11-06 22:31:40,575 - bot - ERROR - Voice reconnect failed: Already connected to a voice channel.
