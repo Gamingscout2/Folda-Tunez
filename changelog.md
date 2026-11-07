@@ -1,5 +1,13 @@
 # Changelog
 
+## Audio source reverted to PCM (legacy path)
+
+- `audio.py`: `TrackedFFmpegPCMAudio` is `discord.FFmpegPCMAudio` again (as in `old.py`).
+  ffmpeg emits raw PCM and discord.py encodes it with libopus. The `FFmpegOpusAudio`
+  pass-through introduced earlier was silent on the server even though the voice connection,
+  DAVE handshake and ffmpeg all reported success. Filters (`-af`) and byte tracking still work.
+  This path needs libopus loaded; `main.py` loads it at startup and logs CRITICAL if it can't.
+
 ## Voice diagnostics
 
 - `FOLDA_DEBUG_VOICE=1` writes discord.py voice/player debug lines to `bot.log` (gateway excluded

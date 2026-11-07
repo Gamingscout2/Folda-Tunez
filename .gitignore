@@ -29,3 +29,5 @@ botbash.history
 bot.log
 yt_dlp.log
 cli.log
+downloads/
+#old.py

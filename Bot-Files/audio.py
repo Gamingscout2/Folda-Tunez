@@ -20,16 +20,12 @@ SONG_FILTERS: Dict[str, Optional[str]] = {
 }
 
 
-class TrackedFFmpegPCMAudio(discord.FFmpegOpusAudio):
-    """Opus-encoded FFmpeg source with per-guild byte tracking.
+class TrackedFFmpegPCMAudio(discord.FFmpegPCMAudio):
+    """PCM FFmpeg source with per-guild byte tracking.
 
-    Inherits from FFmpegOpusAudio (not FFmpegPCMAudio) so ffmpeg encodes
-    audio in the format Discord's voice channel actually uses. This avoids
-    the "ffmpeg process has not terminated" warning on skip/stop and cuts
-    CPU/memory usage per stream.
-
-    The class name is kept identical to the previous PCM version so no
-    changes are needed in music.py or guild_state.py.
+    Raw 48k stereo s16le PCM; discord.py's VoiceClient encodes it with libopus
+    (see _load_opus in main.py). This is the path the legacy build (old.py)
+    used and it is known to produce audible output.
     """
 
     def __init__(self, source, guild_id, filter_name: Optional[str] = None, **kwargs):
@@ -42,8 +38,7 @@ class TrackedFFmpegPCMAudio(discord.FFmpegOpusAudio):
             source,
             executable=FFMPEG_PATH,
             options=options,
-            bitrate=192,
-            **kwargs,
+            **kwargs
         )
         self.guild_id = guild_id
 
