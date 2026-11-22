@@ -186,7 +186,7 @@ Bot-Files/
   history / completion / copy. See [changelog.md](changelog.md).
 - **v0.5.2**: legacy build kept in `old/` for emergency reference (token via env var, DJ roles,
   vote skip, audio filters, 24/7 mode, saved playlists, slash commands).
-- **v2.4 (03/18/2025)**: logging system (`bot.log`, `cli.log`, 5 MB rotation, 3 backups), `!leave`
+- **v0.2.4 (03/18/2025)**: logging system (`bot.log`, `cli.log`, 5 MB rotation, 3 backups), `!leave`
   command restored, CLI operations logged.
 
 ## License
